@@ -16,6 +16,7 @@ pub struct WalStats {
     pub pending_bytes: u64,
     pub appends_since_checkpoint: u64,
     pub sequence: u64,
+    pub skip_sync: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -211,6 +212,7 @@ impl EmbeddedWal {
             pending_bytes: self.pending_bytes,
             appends_since_checkpoint: self.appends_since_checkpoint,
             sequence: self.sequence,
+            skip_sync: self.skip_sync,
         }
     }
 

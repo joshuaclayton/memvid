@@ -619,6 +619,11 @@ impl Memvid {
         crate::persist_header(&mut self.file, &self.header)?;
         self.file.sync_all()?;
         self.wal = EmbeddedWal::open(&self.file, &self.header)?;
+        // The reopen resets skip_sync; a mid-batch growth must keep the
+        // batch's fsync mode or every later append pays a full fsync.
+        if let Some(opts) = &self.batch_opts {
+            self.wal.set_skip_sync(opts.skip_sync);
+        }
         Ok(())
     }
 
@@ -2871,6 +2876,13 @@ impl Memvid {
         } else {
             self.tier().capacity_bytes()
         }
+    }
+
+    /// Snapshot of the embedded WAL's state (region size, pending
+    /// bytes, sequence, fsync mode).
+    #[must_use]
+    pub fn wal_stats(&self) -> crate::io::wal::WalStats {
+        self.wal.stats()
     }
 
     /// Get current storage capacity in bytes.
