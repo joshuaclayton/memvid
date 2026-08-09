@@ -41,6 +41,17 @@ pub struct EmbeddedWal {
 }
 
 impl EmbeddedWal {
+    /// Mark a fully-checkpointed region as empty by writing a zero
+    /// sentinel at its start. Required after the region is resized in
+    /// place: stale record bytes from the previous geometry remain in
+    /// the retained head, and a record straddling the new boundary
+    /// makes the next open's scan misparse them as corruption.
+    pub fn write_empty_sentinel(file: &mut File, header: &Header) -> Result<()> {
+        file.seek(SeekFrom::Start(header.wal_offset))?;
+        file.write_all(&[0u8; ENTRY_HEADER_SIZE])?;
+        Ok(())
+    }
+
     pub fn open(file: &File, header: &Header) -> Result<Self> {
         Self::open_internal(file, header, false)
     }
