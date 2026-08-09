@@ -3079,11 +3079,6 @@ impl Memvid {
         self.toc.segment_catalog.lex_segments.clear();
         self.toc.segment_catalog.vec_segments.clear();
         self.toc.segment_catalog.time_segments.clear();
-        #[cfg(feature = "temporal_track")]
-        {
-            self.toc.temporal_track = None;
-            self.toc.segment_catalog.temporal_segments.clear();
-        }
         #[cfg(feature = "lex")]
         {
             self.toc.segment_catalog.tantivy_segments.clear();
@@ -3123,7 +3118,25 @@ impl Memvid {
             self.header.footer_offset = self.data_end;
         }
 
+        // In a `temporal_track` build, `rebuild_indexes` clears the temporal
+        // manifest and — with the empty delta below — re-emits nothing, so
+        // vacuum must carry the section through by hand, exactly as a
+        // default build does. The section's bytes are pinned below the
+        // footer by the reclaim guard above, and vacuum never renumbers
+        // frames, so the saved manifest and segment descriptors stay valid.
+        #[cfg(feature = "temporal_track")]
+        let preserved_temporal = (
+            self.toc.temporal_track.clone(),
+            self.toc.segment_catalog.temporal_segments.clone(),
+        );
+
         self.rebuild_indexes(&[], &[])?;
+
+        #[cfg(feature = "temporal_track")]
+        {
+            self.toc.temporal_track = preserved_temporal.0;
+            self.toc.segment_catalog.temporal_segments = preserved_temporal.1;
+        }
 
         // `rebuild_indexes` re-emits every section except the sketch track, so
         // persist the deferred sections and re-finalize the TOC. Without this the
