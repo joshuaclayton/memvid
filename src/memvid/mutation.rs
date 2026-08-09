@@ -1333,6 +1333,12 @@ impl Memvid {
                             data_cursor += payload_length;
                             // Keep cached_payload_end in sync (monotonically increasing)
                             self.cached_payload_end = self.cached_payload_end.max(data_cursor);
+                            // Advance data_end immediately: entries with no
+                            // search text are read back from the file later in
+                            // this same replay pass (frame_content for lex
+                            // indexing), and validate_frame_bounds rejects any
+                            // payload past data_end.
+                            self.data_end = self.data_end.max(data_cursor);
                             (
                                 payload_offset,
                                 payload_length,
