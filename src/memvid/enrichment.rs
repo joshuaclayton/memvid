@@ -363,6 +363,15 @@ impl Memvid {
                 };
             }
         };
+        // Frames whose search_text is payload-derived carry no TOC copy;
+        // reconstruct it so enrichment doesn't index empty text.
+        let search_text = if search_text.is_empty() {
+            self.frame_by_id(task.frame_id)
+                .and_then(|frame| self.frame_search_text(&frame))
+                .unwrap_or_default()
+        } else {
+            search_text
+        };
 
         let start = std::time::Instant::now();
         let mut result = TaskResult {
@@ -553,6 +562,15 @@ impl Memvid {
             let (search_text, is_skim, needs_embedding) = match frame_data {
                 Some(data) => data,
                 None => continue, // Frame not found, skip
+            };
+            // Frames whose search_text is payload-derived carry no TOC copy;
+            // reconstruct it so enrichment doesn't index/embed empty text.
+            let search_text = if search_text.is_empty() {
+                self.frame_by_id(task.frame_id)
+                    .and_then(|frame| self.frame_search_text(&frame))
+                    .unwrap_or_default()
+            } else {
+                search_text
             };
 
             // Re-extract if this was a skim

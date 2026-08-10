@@ -122,15 +122,15 @@ impl Memvid {
                 continue;
             }
 
-            // Use search_text if available (covers no_raw mode), otherwise fall back to content
-            let content = if let Some(ref text) = frame.search_text {
+            // Persisted search_text (covers no_raw mode) or its payload-derived
+            // reconstruction; falls back to raw content for frames with neither.
+            let content = {
+                let text = self.frame_search_text(&frame)?;
                 if text.trim().is_empty() {
                     self.frame_content(&frame)?
                 } else {
-                    text.clone()
+                    text
                 }
-            } else {
-                self.frame_content(&frame)?
             };
             if content.trim().is_empty() {
                 continue;

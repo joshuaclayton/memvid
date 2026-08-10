@@ -124,23 +124,25 @@ impl Memvid {
     pub fn build_all_sketches(&mut self, variant: SketchVariant) -> usize {
         let mut count = 0;
 
-        // Collect frames that need sketches
-        let frames_to_sketch: Vec<(FrameId, String)> = self
+        // Collect frames that need sketches; the text itself may need
+        // payload-derived reconstruction, which borrows self mutably.
+        let frames_to_sketch: Vec<crate::types::Frame> = self
             .toc
             .frames
             .iter()
             .filter(|f| f.status == crate::types::FrameStatus::Active)
             .filter(|f| self.sketch_track.get(f.id).is_none())
-            .filter_map(|f| {
-                f.search_text
-                    .clone()
-                    .filter(|t| !t.is_empty())
-                    .map(|text| (f.id, text))
-            })
+            .cloned()
             .collect();
 
-        for (frame_id, text) in frames_to_sketch {
-            self.insert_sketch(frame_id, &text, variant);
+        for frame in frames_to_sketch {
+            let Ok(text) = self.frame_search_text(&frame) else {
+                continue;
+            };
+            if text.is_empty() {
+                continue;
+            }
+            self.insert_sketch(frame.id, &text, variant);
             count += 1;
         }
 
@@ -285,6 +287,44 @@ impl Memvid {
 mod tests {
     use super::*;
     use tempfile::NamedTempFile;
+
+    /// Frames whose search_text is payload-derived carry no TOC copy;
+    /// post-hoc sketch building must reconstruct the text rather than
+    /// skipping those frames.
+    #[test]
+    fn build_all_sketches_reconstructs_derived_text() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("sketch.mv2");
+        {
+            let mut mem = Memvid::create(&path).expect("create");
+            for (uri, title, text) in [
+                ("mv2://a", "First", "granite formations in the valley"),
+                ("mv2://b", "Second", "limestone caves under the hills"),
+            ] {
+                let opts = crate::PutOptions {
+                    uri: Some(uri.to_string()),
+                    title: Some(title.to_string()),
+                    timestamp: Some(1_700_000_000),
+                    ..Default::default()
+                };
+                mem.put_bytes_with_options(text.as_bytes(), opts)
+                    .expect("put");
+            }
+            mem.commit().expect("commit");
+        }
+
+        let mut mem = Memvid::open(&path).expect("open");
+        for id in 0..2 {
+            let frame = mem.frame_by_id(id).expect("frame");
+            assert_eq!(frame.search_text, None, "text must be payload-derived");
+        }
+        // Drop replay-built sketches to simulate a store needing a rebuild.
+        mem.sketch_track = crate::types::SketchTrack::default();
+        let built = mem.build_all_sketches(SketchVariant::Small);
+        assert_eq!(built, 2, "both frames must sketch from reconstructed text");
+        assert!(mem.sketch_track.get(0).is_some());
+        assert!(mem.sketch_track.get(1).is_some());
+    }
 
     #[test]
     fn test_sketch_insert_and_query() {
