@@ -492,7 +492,7 @@ impl Memvid {
         Ok(payloads)
     }
 
-    fn document_chunk_frames(&self, parent_id: FrameId) -> Vec<Frame> {
+    pub(crate) fn document_chunk_frames(&self, parent_id: FrameId) -> Vec<Frame> {
         let mut frames: Vec<Frame> = self
             .toc
             .frames
