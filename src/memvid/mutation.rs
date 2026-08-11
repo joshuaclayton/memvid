@@ -367,6 +367,40 @@ pub(crate) fn extract_via_registry(
     Ok(finalize_reader_output(output, start))
 }
 
+/// True when re-running registry extraction on `bytes` with `mime_b`
+/// instead of `mime_a` provably produces identical output: both hints
+/// resolve to the same reader and that reader ignores its hint. Lets the
+/// search_text derivability decision skip a verification re-extraction
+/// for the common case where extraction detected a mime the caller had
+/// not supplied (write hint `None`, read hint `Some(detected)`).
+fn extraction_hint_invariant(
+    bytes: &[u8],
+    mime_a: Option<&str>,
+    mime_b: Option<&str>,
+    uri: Option<&str>,
+) -> bool {
+    if mime_a == mime_b {
+        return true;
+    }
+    let registry = default_reader_registry();
+    let magic = bytes
+        .get(..MAGIC_SNIFF_BYTES)
+        .and_then(|slice| if slice.is_empty() { None } else { Some(slice) });
+    let reader_for = |mime: Option<&str>| {
+        let hint = ReaderHint::new(mime, infer_document_format(mime, magic, uri))
+            .with_uri(uri)
+            .with_magic(magic);
+        registry.find_reader(&hint)
+    };
+    match (reader_for(mime_a), reader_for(mime_b)) {
+        // No registered reader matched either hint: both fall back to the
+        // hint-ignoring PassthroughReader.
+        (None, None) => true,
+        (Some(a), Some(b)) => a.name() == b.name() && a.hint_invariant(),
+        _ => false,
+    }
+}
+
 fn finalize_reader_output(output: ReaderOutput, start: Instant) -> ExtractedDocument {
     let elapsed = start.elapsed();
     let ReaderOutput {
@@ -3808,10 +3842,18 @@ impl Memvid {
             let read_mime_hint = metadata.as_ref().and_then(|m| m.mime.as_deref());
             if base_from_extractor
                 && extraction_used_registry
-                && read_mime_hint == write_mime_hint.as_deref()
+                && payload.is_some_and(|bytes| {
+                    extraction_hint_invariant(
+                        bytes,
+                        write_mime_hint.as_deref(),
+                        read_mime_hint,
+                        uri_value.as_deref(),
+                    )
+                })
             {
-                // Reconstruction re-runs the same extractor with the same
-                // hints on the same bytes: identical by construction.
+                // Reconstruction re-runs the same extraction on the same
+                // bytes with hints proven equivalent: identical by
+                // construction.
                 true
             } else if let Some(bytes) = payload {
                 // Caller-supplied or budget-extracted text: derivable only
@@ -4368,5 +4410,43 @@ pub(crate) fn merge_unique(target: &mut Vec<String>, additions: Vec<String>) {
         if seen.insert(candidate.clone()) {
             target.push(candidate);
         }
+    }
+}
+
+#[cfg(test)]
+mod extraction_hint_invariant_tests {
+    use super::extraction_hint_invariant;
+
+    #[test]
+    fn plain_text_is_invariant_between_no_hint_and_detected_mime() {
+        let bytes = b"ordinary utf-8 prose with no markup";
+        assert!(extraction_hint_invariant(
+            bytes,
+            None,
+            Some("text/plain"),
+            Some("mv2://notes/1"),
+        ));
+    }
+
+    #[test]
+    fn equal_hints_are_trivially_invariant() {
+        assert!(extraction_hint_invariant(
+            b"anything",
+            Some("text/plain"),
+            Some("text/plain"),
+            None,
+        ));
+    }
+
+    #[test]
+    fn pdf_reader_is_not_hint_invariant() {
+        // %PDF magic routes to the PDF reader, which consumes its hint.
+        let bytes = b"%PDF-1.4 fake";
+        assert!(!extraction_hint_invariant(
+            bytes,
+            None,
+            Some("application/pdf"),
+            None,
+        ));
     }
 }

@@ -44,4 +44,10 @@ impl DocumentReader for PassthroughReader {
         let document = Self::processor().extract_from_bytes(bytes)?;
         Ok(ReaderOutput::new(document, self.name()).with_diagnostics(ReaderDiagnostics::default()))
     }
+
+    /// `extract` never reads its hint (see `_hint` above): output is a pure
+    /// function of the bytes.
+    fn hint_invariant(&self) -> bool {
+        true
+    }
 }

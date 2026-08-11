@@ -171,6 +171,13 @@ pub trait DocumentReader: Send + Sync {
 
     /// Extract text and metadata from the provided bytes.
     fn extract(&self, bytes: &[u8], hint: &ReaderHint<'_>) -> Result<ReaderOutput>;
+
+    /// True when `extract` output depends only on the bytes — the reader
+    /// ignores its hint entirely. Lets callers prove two extractions with
+    /// different hints produce identical output without running either.
+    fn hint_invariant(&self) -> bool {
+        false
+    }
 }
 
 /// Registry of document readers used by the ingestion router.
