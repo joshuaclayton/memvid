@@ -1026,11 +1026,14 @@ pub fn is_frame_text_indexable(frame: &crate::types::Frame) -> bool {
         return false;
     }
 
-    // Must have non-empty search text
+    // Must have non-empty search text, or a source to reconstruct it from
+    // (payload-derived search_text is not persisted in the TOC)
     frame
         .search_text
         .as_ref()
         .is_some_and(|t| !t.trim().is_empty())
+        || frame.payload_length > 0
+        || frame.chunk_manifest.is_some()
 }
 
 #[cfg(feature = "lex")]
@@ -1056,23 +1059,6 @@ impl Memvid {
                 }
             }
 
-            // Get MIME type from metadata
-            let mime = frame
-                .metadata
-                .as_ref()
-                .and_then(|m| m.mime.as_deref())
-                .unwrap_or("application/octet-stream");
-
-            // Skip binary content types (videos, images, audio, etc.)
-            if !is_text_indexable_mime(mime) {
-                tracing::debug!(
-                    "skipping frame {} - binary content type: {} (not text-indexable)",
-                    frame.id,
-                    mime
-                );
-                continue;
-            }
-
             // Check payload size limit for text content
             if frame.payload_length > max_payload {
                 tracing::debug!(
@@ -1084,6 +1070,9 @@ impl Memvid {
                 continue;
             }
 
+            // No persisted copy: reconstruct (payload-derived search_text is
+            // not stored in the TOC). No MIME gate here — the write path
+            // indexed whatever the frame's search_text held, mime-agnostic.
             let text = self.frame_search_text(&frame)?;
             if text.trim().is_empty() {
                 continue;

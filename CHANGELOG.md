@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- TOC entries no longer persist `search_text` that is reconstructable from
+  the frame's stored payload and TOC fields; read paths derive it on
+  demand. Cuts TOC size (and open-time decode cost) by roughly the corpus
+  text size on text-heavy stores. Non-derivable text (explicit
+  `search_text` differing from the payload, `no_raw` frames, skim
+  extractions) persists exactly as before, and files written by older
+  versions read unchanged.
+
+### Fixed
+- `update_frame` no longer inherits the superseded frame's `search_text`
+  when the payload is replaced and no explicit text is passed: extraction
+  re-derives it from the new payload, so updated frames are searchable by
+  their new text instead of the old text they replaced.
+
 ### Added
 - Initial public release of Memvid core library
 - Single-file `.mv2` format for portable AI memory

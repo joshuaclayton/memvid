@@ -3,12 +3,12 @@
 use std::collections::HashMap;
 
 use crate::memvid::lifecycle::Memvid;
-use crate::memvid::mutation::augment_search_text;
+use crate::memvid::mutation::{augment_search_text, extract_via_registry};
 use crate::types::Frame;
 use crate::types::{
-    EmbeddingIdentity, EmbeddingIdentityCount, EmbeddingIdentitySummary, FrameStatus,
+    EmbeddingIdentity, EmbeddingIdentityCount, EmbeddingIdentitySummary, FrameRole, FrameStatus,
 };
-use crate::{MemvidError, Result};
+use crate::{DEFAULT_SEARCH_TEXT_LIMIT, MemvidError, Result, normalize_text};
 
 impl Memvid {
     /// Returns the vector index dimension stored in the MV2 file, if available.
@@ -154,14 +154,80 @@ impl Memvid {
         )
     }
 
+    /// The frame's search text: the persisted TOC copy when present,
+    /// otherwise reconstructed from the payload and TOC fields with the
+    /// same rules the write path used to produce it.
     pub(crate) fn frame_search_text(&mut self, frame: &Frame) -> Result<String> {
         if let Some(text) = &frame.search_text {
-            Ok(text.clone())
-        } else {
-            let base = self.frame_content(frame)?;
-            Ok(self
-                .augment_text_for_frame(Some(base), frame)
-                .unwrap_or_default())
+            return Ok(text.clone());
         }
+        self.derive_frame_search_text(frame)
+    }
+
+    /// Reconstruct the search text a frame's TOC entry would have carried.
+    /// Mirrors the write path per frame shape:
+    /// - chunk children: normalized chunk payload text
+    /// - chunked parents: normalized first-chunk text
+    /// - other frames: augmented normalized extraction of the payload
+    pub(crate) fn derive_frame_search_text(&mut self, frame: &Frame) -> Result<String> {
+        if frame.role == FrameRole::DocumentChunk {
+            let bytes = self.frame_canonical_bytes(frame)?;
+            let text = match String::from_utf8(bytes) {
+                Ok(text) => text,
+                Err(err) => Self::render_binary_summary(err.into_bytes().len()),
+            };
+            return Ok(normalize_text(&text, DEFAULT_SEARCH_TEXT_LIMIT)
+                .map(|n| n.text)
+                .unwrap_or_default());
+        }
+
+        if frame.chunk_manifest.is_some() {
+            let Some(first_chunk) = self.first_document_chunk(frame) else {
+                return Ok(String::new());
+            };
+            let bytes = self.frame_canonical_bytes(&first_chunk)?;
+            let text = String::from_utf8_lossy(&bytes);
+            return Ok(normalize_text(&text, DEFAULT_SEARCH_TEXT_LIMIT)
+                .map(|n| n.text)
+                .unwrap_or_default());
+        }
+
+        // The base must match the write-side derivability comparison exactly
+        // (extraction only, no fallback), or reconstructed text would diverge
+        // from what the write path decided was droppable.
+        let base = if frame.payload_length == 0 {
+            None
+        } else {
+            let bytes = self.frame_canonical_bytes(frame)?;
+            let mime_hint = frame.metadata.as_ref().and_then(|m| m.mime.as_deref());
+            let uri_hint = frame.uri.as_deref();
+            extract_via_registry(&bytes, mime_hint, uri_hint)
+                .ok()
+                .and_then(|doc| doc.text)
+                .and_then(|text| normalize_text(&text, DEFAULT_SEARCH_TEXT_LIMIT).map(|n| n.text))
+        };
+        Ok(self.augment_text_for_frame(base, frame).unwrap_or_default())
+    }
+
+    /// The first chunk child of a chunked document. Replay assigns chunk
+    /// children contiguously after their parent, so the direct id lookup
+    /// covers the common case in O(1); reconstruction over a whole store
+    /// would otherwise pay a full TOC scan per parent. Falls back to the
+    /// scan for layouts where the assumption does not hold.
+    fn first_document_chunk(&self, parent: &Frame) -> Option<Frame> {
+        let direct = usize::try_from(parent.id.saturating_add(1))
+            .ok()
+            .and_then(|idx| self.toc.frames.get(idx))
+            .filter(|child| {
+                child.parent_id == Some(parent.id)
+                    && child.role == FrameRole::DocumentChunk
+                    && child.status == FrameStatus::Active
+                    && child.chunk_index == Some(0)
+            });
+        if let Some(child) = direct {
+            return Some(child.clone());
+        }
+        // document_chunk_frames sorts by chunk_index, so first() is chunk 0.
+        self.document_chunk_frames(parent.id).into_iter().next()
     }
 }

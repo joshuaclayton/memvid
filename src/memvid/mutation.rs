@@ -321,7 +321,7 @@ fn detect_pdf_magic(magic: Option<&[u8]>) -> bool {
     skip_all,
     fields(mime = mime_hint, uri = uri)
 )]
-fn extract_via_registry(
+pub(crate) fn extract_via_registry(
     bytes: &[u8],
     mime_hint: Option<&str>,
     uri: Option<&str>,
@@ -365,6 +365,40 @@ fn extract_via_registry(
         output.diagnostics.track_warning(reason);
     }
     Ok(finalize_reader_output(output, start))
+}
+
+/// True when re-running registry extraction on `bytes` with `mime_b`
+/// instead of `mime_a` provably produces identical output: both hints
+/// resolve to the same reader and that reader ignores its hint. Lets the
+/// search_text derivability decision skip a verification re-extraction
+/// for the common case where extraction detected a mime the caller had
+/// not supplied (write hint `None`, read hint `Some(detected)`).
+fn extraction_hint_invariant(
+    bytes: &[u8],
+    mime_a: Option<&str>,
+    mime_b: Option<&str>,
+    uri: Option<&str>,
+) -> bool {
+    if mime_a == mime_b {
+        return true;
+    }
+    let registry = default_reader_registry();
+    let magic = bytes
+        .get(..MAGIC_SNIFF_BYTES)
+        .and_then(|slice| if slice.is_empty() { None } else { Some(slice) });
+    let reader_for = |mime: Option<&str>| {
+        let hint = ReaderHint::new(mime, infer_document_format(mime, magic, uri))
+            .with_uri(uri)
+            .with_magic(magic);
+        registry.find_reader(&hint)
+    };
+    match (reader_for(mime_a), reader_for(mime_b)) {
+        // No registered reader matched either hint: both fall back to the
+        // hint-ignoring PassthroughReader.
+        (None, None) => true,
+        (Some(a), Some(b)) => a.name() == b.name() && a.hint_invariant(),
+        _ => false,
+    }
 }
 
 fn finalize_reader_output(output: ReaderOutput, start: Instant) -> ExtractedDocument {
@@ -1203,21 +1237,14 @@ impl Memvid {
                                 }
                             }
 
-                            // Get MIME type and check if text-indexable
-                            let mime = frame
-                                .metadata
-                                .as_ref()
-                                .and_then(|m| m.mime.as_deref())
-                                .unwrap_or("application/octet-stream");
-
-                            if !crate::memvid::search::is_text_indexable_mime(mime) {
-                                continue;
-                            }
-
                             if frame.payload_length > max_payload {
                                 continue;
                             }
 
+                            // No persisted copy: reconstruct (payload-derived
+                            // search_text is not stored in the TOC). No MIME
+                            // gate here — the write path indexed whatever the
+                            // frame's search_text held, mime-agnostic.
                             let text = self.frame_search_text(&frame)?;
                             if !text.trim().is_empty() {
                                 prepared_docs.push((frame, text));
@@ -1511,7 +1538,14 @@ impl Memvid {
                             canonical_encoding: entry.canonical_encoding,
                             canonical_length: Some(canonical_length_value),
                             metadata: entry.metadata.clone(),
-                            search_text: entry.search_text.clone(),
+                            // Derivable search_text is not persisted: read
+                            // paths reconstruct it from the payload and TOC
+                            // fields on demand.
+                            search_text: if entry.search_text_derived {
+                                None
+                            } else {
+                                entry.search_text.clone()
+                            },
                             tags: entry.tags.clone(),
                             labels: entry.labels.clone(),
                             extra_metadata: entry.extra_metadata.clone(),
@@ -2304,17 +2338,13 @@ impl Memvid {
                                 continue;
                             }
                         }
-                        let mime = frame
-                            .metadata
-                            .as_ref()
-                            .and_then(|m| m.mime.as_deref())
-                            .unwrap_or("application/octet-stream");
-                        if !crate::memvid::search::is_text_indexable_mime(mime) {
-                            continue;
-                        }
                         if frame.payload_length > max_payload {
                             continue;
                         }
+                        // No persisted copy: reconstruct (payload-derived
+                        // search_text is not stored in the TOC). No MIME gate
+                        // here — the write path indexed whatever the frame's
+                        // search_text held, mime-agnostic.
                         let text = self.frame_search_text(&frame)?;
                         if !text.trim().is_empty() {
                             prepared_docs.push((frame, text));
@@ -3464,7 +3494,11 @@ impl Memvid {
         if options.metadata.is_none() {
             options.metadata = existing.metadata.clone();
         }
-        if options.search_text.is_none() {
+        // Inherit search_text only when the payload is untouched. When the
+        // payload is replaced, leaving it unset lets extraction re-derive the
+        // text from the new bytes — inheriting here would keep the update
+        // matching the superseded frame's text instead of its own.
+        if options.search_text.is_none() && payload.is_none() {
             options.search_text = existing.search_text.clone();
         }
         if options.tags.is_empty() {
@@ -3549,6 +3583,7 @@ impl Memvid {
             supersedes_frame_id: None,
             reuse_payload_from: None,
             source_sha256: None,
+            search_text_derived: false,
             source_path: None,
             enrichment_state: crate::types::EnrichmentState::default(),
         };
@@ -3789,6 +3824,11 @@ impl Memvid {
 
         let mut extraction_error = None;
         let mut is_skim_extraction = false; // Track if extraction was time-limited
+        // The mime hint extraction ran with; read-time reconstruction uses the
+        // post-merge metadata mime, so derivability requires knowing whether
+        // the hints match (see `search_text_derived` below).
+        let write_mime_hint: Option<String> = metadata.as_ref().and_then(|m| m.mime.clone());
+        let mut extraction_used_registry = false;
 
         let extracted = if run_extractor {
             if let Some(bytes) = payload_for_processing {
@@ -3840,7 +3880,10 @@ impl Memvid {
                                 "budgeted extraction failed, trying full extraction"
                             );
                             match extract_via_registry(bytes, mime_hint, uri_hint) {
-                                Ok(doc) => Some(doc),
+                                Ok(doc) => {
+                                    extraction_used_registry = true;
+                                    Some(doc)
+                                }
                                 Err(err) => {
                                     extraction_error = Some(err);
                                     None
@@ -3851,7 +3894,10 @@ impl Memvid {
                 } else {
                     // Full extraction (no time budget)
                     match extract_via_registry(bytes, mime_hint, uri_hint) {
-                        Ok(doc) => Some(doc),
+                        Ok(doc) => {
+                            extraction_used_registry = true;
+                            Some(doc)
+                        }
                         Err(err) => {
                             extraction_error = Some(err);
                             None
@@ -3869,6 +3915,7 @@ impl Memvid {
             return Err(err);
         }
 
+        let mut base_from_extractor = false;
         if let Some(doc) = &extracted {
             if need_search_text {
                 if let Some(text) = &doc.text {
@@ -3876,6 +3923,7 @@ impl Memvid {
                         normalize_text(text, DEFAULT_SEARCH_TEXT_LIMIT).map(|n| n.text)
                     {
                         search_text = Some(normalized);
+                        base_from_extractor = true;
                     }
                 }
             }
@@ -3932,6 +3980,9 @@ impl Memvid {
         }
 
         let metadata_ref = metadata.as_ref();
+        // The pre-augmentation base; the derivability check below compares a
+        // read-shaped re-extraction against this.
+        let base_text = search_text.clone();
         let mut search_text = augment_search_text(
             search_text,
             options.uri.as_deref(),
@@ -3947,6 +3998,15 @@ impl Memvid {
         let mut parent_chunk_manifest: Option<TextChunkManifest> = None;
         let mut parent_chunk_count: Option<u32> = None;
 
+        // Chunked parents replace their search_text with the normalized first
+        // chunk; computed once so the derivability decision mirrors the
+        // overwrite exactly.
+        let parent_first_chunk_text = chunk_plan
+            .as_ref()
+            .and_then(|plan| plan.chunks.first())
+            .and_then(|chunk| normalize_text(chunk, DEFAULT_SEARCH_TEXT_LIMIT).map(|n| n.text))
+            .filter(|text| !text.trim().is_empty());
+
         let kind_value = options.kind.take();
         let track_value = options.track.take();
         let uri_value = options.uri.take();
@@ -3961,14 +4021,8 @@ impl Memvid {
             parent_chunk_manifest = Some(plan.manifest.clone());
             parent_chunk_count = Some(chunk_total);
 
-            if let Some(first_chunk) = plan.chunks.first() {
-                if let Some(normalized) =
-                    normalize_text(first_chunk, DEFAULT_SEARCH_TEXT_LIMIT).map(|n| n.text)
-                {
-                    if !normalized.trim().is_empty() {
-                        search_text = Some(normalized);
-                    }
-                }
+            if let Some(normalized) = parent_first_chunk_text.clone() {
+                search_text = Some(normalized);
             }
 
             let chunk_tags = tags.clone();
@@ -4025,9 +4079,66 @@ impl Memvid {
                     source_path: None,
                     // Chunks are already extracted, so mark as Enriched
                     enrichment_state: crate::types::EnrichmentState::Enriched,
+                    // Chunk search_text is the normalized chunk payload.
+                    search_text_derived: true,
                 });
             }
         }
+
+        // Decide whether the TOC entry may omit search_text. The WAL entry
+        // always carries it (commit-time indexing reads it from the record);
+        // the TOC keeps a copy only when read-time reconstruction cannot
+        // reproduce it exactly.
+        let search_text_derived = if chunk_plan.is_some() {
+            // The parent value is the normalized first chunk, and chunk
+            // children always store their payload. When the first chunk
+            // normalized to nothing, search_text kept the augmented base and
+            // is not reconstructable from the children.
+            parent_first_chunk_text.is_some()
+        } else if payload.is_none()
+            || options.no_raw
+            || reuse_payload_from.is_some()
+            || is_skim_extraction
+            || uri_value.is_none()
+            || title_value.is_none()
+        {
+            // No stored payload to derive from (reused payload, no_raw), a
+            // time-budgeted skim (not reproducible), or replay would default
+            // uri/title and the reconstructed field dump would differ from
+            // the write-time one.
+            false
+        } else {
+            let read_mime_hint = metadata.as_ref().and_then(|m| m.mime.as_deref());
+            if base_from_extractor
+                && extraction_used_registry
+                && payload.is_some_and(|bytes| {
+                    extraction_hint_invariant(
+                        bytes,
+                        write_mime_hint.as_deref(),
+                        read_mime_hint,
+                        uri_value.as_deref(),
+                    )
+                })
+            {
+                // Reconstruction re-runs the same extraction on the same
+                // bytes with hints proven equivalent: identical by
+                // construction.
+                true
+            } else if let Some(bytes) = payload {
+                // Caller-supplied or budget-extracted text: derivable only
+                // when a read-shaped re-extraction reproduces the base.
+                let derived_base =
+                    extract_via_registry(bytes, read_mime_hint, uri_value.as_deref())
+                        .ok()
+                        .and_then(|doc| doc.text)
+                        .and_then(|text| {
+                            normalize_text(&text, DEFAULT_SEARCH_TEXT_LIMIT).map(|n| n.text)
+                        });
+                derived_base == base_text
+            } else {
+                false
+            }
+        };
 
         let parent_uri = uri_value.clone();
         let parent_title = title_value.clone();
@@ -4105,6 +4216,7 @@ impl Memvid {
             source_sha256,
             source_path: source_path_value,
             enrichment_state,
+            search_text_derived,
         };
 
         let parent_bytes = encode_to_vec(WalEntry::Frame(entry), wal_config())?;
@@ -4265,8 +4377,18 @@ fn decode_wal_entry(bytes: &[u8]) -> Result<WalEntry> {
     if let Ok((entry, _)) = decode_from_slice::<WalEntry, _>(bytes, wal_config()) {
         return Ok(entry);
     }
-    let (legacy, _) = decode_from_slice::<WalEntryData, _>(bytes, wal_config())?;
-    Ok(WalEntry::Frame(legacy))
+    // Entries written before `search_text_derived` was appended to
+    // WalEntryData decode one field short of the current shape; retry with
+    // the frozen legacy layout before falling back to bare (un-enumed)
+    // records from even older writers.
+    if let Ok((legacy, _)) = decode_from_slice::<LegacyWalEntry, _>(bytes, wal_config()) {
+        return Ok(legacy.into());
+    }
+    if let Ok((entry, _)) = decode_from_slice::<WalEntryData, _>(bytes, wal_config()) {
+        return Ok(WalEntry::Frame(entry));
+    }
+    let (legacy, _) = decode_from_slice::<LegacyWalEntryData, _>(bytes, wal_config())?;
+    Ok(WalEntry::Frame(legacy.into()))
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -4323,6 +4445,119 @@ pub(crate) struct WalEntryData {
     /// Enrichment state for progressive ingestion.
     #[serde(default)]
     pub(crate) enrichment_state: crate::types::EnrichmentState,
+    /// True when `search_text` is byte-for-byte reconstructable from the
+    /// frame's stored payload plus its TOC fields. The commit replay still
+    /// indexes from `search_text`, but projects `None` into the TOC entry
+    /// so the text is not persisted twice.
+    #[serde(default)]
+    pub(crate) search_text_derived: bool,
+}
+
+/// Frozen pre-`search_text_derived` WAL layout, kept for decoding records
+/// written by earlier versions (see `decode_wal_entry`).
+#[derive(Debug, Deserialize)]
+enum LegacyWalEntry {
+    Frame(LegacyWalEntryData),
+    #[cfg(feature = "lex")]
+    Lex(LexWalBatch),
+}
+
+impl From<LegacyWalEntry> for WalEntry {
+    fn from(legacy: LegacyWalEntry) -> Self {
+        match legacy {
+            LegacyWalEntry::Frame(data) => Self::Frame(data.into()),
+            #[cfg(feature = "lex")]
+            LegacyWalEntry::Lex(batch) => Self::Lex(batch),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct LegacyWalEntryData {
+    timestamp: i64,
+    kind: Option<String>,
+    track: Option<String>,
+    payload: Vec<u8>,
+    embedding: Option<Vec<f32>>,
+    #[serde(default)]
+    uri: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    canonical_encoding: CanonicalEncoding,
+    #[serde(default)]
+    canonical_length: Option<u64>,
+    #[serde(default)]
+    metadata: Option<DocMetadata>,
+    #[serde(default)]
+    search_text: Option<String>,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default)]
+    labels: Vec<String>,
+    #[serde(default)]
+    extra_metadata: BTreeMap<String, String>,
+    #[serde(default)]
+    content_dates: Vec<String>,
+    #[serde(default)]
+    chunk_manifest: Option<TextChunkManifest>,
+    #[serde(default)]
+    role: FrameRole,
+    #[serde(default)]
+    parent_sequence: Option<u64>,
+    #[serde(default)]
+    chunk_index: Option<u32>,
+    #[serde(default)]
+    chunk_count: Option<u32>,
+    #[serde(default)]
+    op: FrameWalOp,
+    #[serde(default)]
+    target_frame_id: Option<FrameId>,
+    #[serde(default)]
+    supersedes_frame_id: Option<FrameId>,
+    #[serde(default)]
+    reuse_payload_from: Option<FrameId>,
+    #[serde(default)]
+    source_sha256: Option<[u8; 32]>,
+    #[serde(default)]
+    source_path: Option<String>,
+    #[serde(default)]
+    enrichment_state: crate::types::EnrichmentState,
+}
+
+impl From<LegacyWalEntryData> for WalEntryData {
+    fn from(legacy: LegacyWalEntryData) -> Self {
+        Self {
+            timestamp: legacy.timestamp,
+            kind: legacy.kind,
+            track: legacy.track,
+            payload: legacy.payload,
+            embedding: legacy.embedding,
+            uri: legacy.uri,
+            title: legacy.title,
+            canonical_encoding: legacy.canonical_encoding,
+            canonical_length: legacy.canonical_length,
+            metadata: legacy.metadata,
+            search_text: legacy.search_text,
+            tags: legacy.tags,
+            labels: legacy.labels,
+            extra_metadata: legacy.extra_metadata,
+            content_dates: legacy.content_dates,
+            chunk_manifest: legacy.chunk_manifest,
+            role: legacy.role,
+            parent_sequence: legacy.parent_sequence,
+            chunk_index: legacy.chunk_index,
+            chunk_count: legacy.chunk_count,
+            op: legacy.op,
+            target_frame_id: legacy.target_frame_id,
+            supersedes_frame_id: legacy.supersedes_frame_id,
+            reuse_payload_from: legacy.reuse_payload_from,
+            source_sha256: legacy.source_sha256,
+            source_path: legacy.source_path,
+            enrichment_state: legacy.enrichment_state,
+            search_text_derived: false,
+        }
+    }
 }
 
 pub(crate) fn prepare_canonical_payload(
@@ -4528,5 +4763,43 @@ mod temporal_track_vacuum {
             file_len,
             old_footer
         );
+    }
+}
+
+#[cfg(test)]
+mod extraction_hint_invariant_tests {
+    use super::extraction_hint_invariant;
+
+    #[test]
+    fn plain_text_is_invariant_between_no_hint_and_detected_mime() {
+        let bytes = b"ordinary utf-8 prose with no markup";
+        assert!(extraction_hint_invariant(
+            bytes,
+            None,
+            Some("text/plain"),
+            Some("mv2://notes/1"),
+        ));
+    }
+
+    #[test]
+    fn equal_hints_are_trivially_invariant() {
+        assert!(extraction_hint_invariant(
+            b"anything",
+            Some("text/plain"),
+            Some("text/plain"),
+            None,
+        ));
+    }
+
+    #[test]
+    fn pdf_reader_is_not_hint_invariant() {
+        // %PDF magic routes to the PDF reader, which consumes its hint.
+        let bytes = b"%PDF-1.4 fake";
+        assert!(!extraction_hint_invariant(
+            bytes,
+            None,
+            Some("application/pdf"),
+            None,
+        ));
     }
 }

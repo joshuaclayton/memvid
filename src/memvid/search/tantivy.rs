@@ -158,12 +158,13 @@ pub(super) fn try_tantivy_search(
 
         // Use the frame's search text for evaluation. While hit.content comes from Tantivy,
         // it may have incorrect frame_id mappings due to indexing issues. The frame's search_text
-        // from TOC is authoritative for this frame_id.
-        let eval_text = frame_meta
-            .search_text
-            .as_deref()
-            .map(str::to_ascii_lowercase)
-            .unwrap_or_else(|| chunk_info.text.to_ascii_lowercase());
+        // (persisted or reconstructed from the payload) is authoritative for this frame_id and
+        // matches what was indexed — chunk_info.text alone would miss augmented field-dump terms
+        // and non-first-chunk text, culling hits the index legitimately returned.
+        let eval_text = match memvid.frame_search_text(&frame_meta) {
+            Ok(text) if !text.is_empty() => text.to_ascii_lowercase(),
+            _ => chunk_info.text.to_ascii_lowercase(),
+        };
 
         // Evaluate the parsed query to filter results. This is necessary for:
         // - Field terms (uri, track, tags, etc.) that Tantivy may have matched loosely

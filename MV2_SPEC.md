@@ -108,6 +108,24 @@ Each frame represents a single piece of content.
 | 1 | Zstd | Zstandard compression |
 | 2 | Lz4 | LZ4 compression |
 
+### Search Text Storage
+
+A frame's search text (its indexable text plus a deterministic dump of its
+metadata fields) is persisted in the TOC entry **only when it cannot be
+reconstructed** from the frame's stored payload and TOC fields — e.g.
+caller-supplied text that differs from the payload, `no_raw` frames whose
+payload is not stored, or time-budgeted (skim) extractions. For the common
+case — text derived from the stored payload — the TOC entry carries no
+copy and readers reconstruct it on demand. This keeps the TOC (and file)
+from duplicating corpus text and bounds TOC decode cost at open time.
+
+WAL frame records still carry the full search text so commit-time index
+building never re-extracts; a `search_text_derived` flag on the record
+tells replay whether the TOC projection may drop it. Records written
+before this field decode with the legacy layout (flag treated as false).
+Files written by older versions read unchanged: their TOC entries keep
+their persisted copies, which always take precedence over reconstruction.
+
 ## Data Segments
 
 Frames are grouped into segments for efficient storage and retrieval.
