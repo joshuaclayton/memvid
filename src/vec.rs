@@ -36,12 +36,27 @@ pub struct VecDocument {
 #[derive(Default)]
 pub struct VecIndexBuilder {
     documents: Vec<VecDocument>,
+    // Only read when a vector-index feature is compiled in (see `hnsw_threshold`).
+    #[allow(dead_code)]
+    hnsw_threshold: Option<usize>,
 }
 
 impl VecIndexBuilder {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Override the vector count at or above which an HNSW graph is built
+    /// instead of a brute force index.
+    ///
+    /// `None` (the default) uses the built-in threshold; `Some(usize::MAX)`
+    /// forces the brute force index at any size (cheaper to build, exact to
+    /// search, `O(n)` queries).
+    #[must_use]
+    pub fn hnsw_threshold(mut self, threshold: Option<usize>) -> Self {
+        self.hnsw_threshold = threshold;
+        self
     }
 
     pub fn add_document<I>(&mut self, frame_id: FrameId, embedding: I)
@@ -56,7 +71,7 @@ impl VecIndexBuilder {
 
     pub fn finish(self) -> Result<VecIndexArtifact> {
         #[cfg(any(feature = "vec", feature = "hnsw_bench"))]
-        if self.documents.len() >= HNSW_THRESHOLD {
+        if self.documents.len() >= self.hnsw_threshold.unwrap_or(HNSW_THRESHOLD) {
             return self.finish_hnsw();
         }
 
@@ -481,6 +496,43 @@ mod tests {
             matches!(index, VecIndex::Hnsw(_)),
             "Expected HNSW index for {} vectors",
             HNSW_THRESHOLD
+        );
+    }
+
+    /// `Some(usize::MAX)` builds the brute force `Uncompressed` index above the
+    /// default crossover, and search returns the exact nearest neighbor.
+    #[test]
+    #[cfg(any(feature = "vec", feature = "hnsw_bench"))]
+    fn hnsw_threshold_override_uses_brute_force() {
+        use super::HNSW_THRESHOLD;
+
+        // More vectors than the default crossover — normally an HNSW graph.
+        let count = HNSW_THRESHOLD + 128;
+        let dim = 16;
+        let mut builder = VecIndexBuilder::new().hnsw_threshold(Some(usize::MAX));
+        for i in 0..count {
+            let embedding: Vec<f32> = (0..dim).map(|j| (i * dim + j) as f32 / 1000.0).collect();
+            builder.add_document(i as FrameId, embedding);
+        }
+
+        let artifact = builder.finish().expect("finish brute force");
+        assert_eq!(artifact.vector_count, count as u64);
+
+        let index = VecIndex::decode(&artifact.bytes).expect("decode");
+        assert!(
+            matches!(index, VecIndex::Uncompressed { .. }),
+            "override should force the brute force index above the default threshold"
+        );
+
+        // Brute force search returns the exact planted vector.
+        let target = count - 7;
+        let query: Vec<f32> = (0..dim)
+            .map(|j| (target * dim + j) as f32 / 1000.0)
+            .collect();
+        let hits = index.search(&query, 1);
+        assert_eq!(
+            hits.first().map(|hit| hit.frame_id),
+            Some(target as FrameId)
         );
     }
 

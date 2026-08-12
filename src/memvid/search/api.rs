@@ -72,6 +72,19 @@ impl Memvid {
         self.search_lex(query, limit)
     }
 
+    /// Override the vector count at or above which the vector index is built as
+    /// an HNSW graph instead of a brute force index.
+    ///
+    /// `None` (the default) uses the built-in threshold; `Some(usize::MAX)`
+    /// forces the brute force index at any size (cheaper to build, exact to
+    /// search, `O(n)` queries).
+    ///
+    /// Not persisted: applies to the next `commit` and resets to the default
+    /// when the memory is reopened.
+    pub fn set_vec_hnsw_threshold(&mut self, threshold: Option<usize>) {
+        self.vec_hnsw_threshold = threshold;
+    }
+
     pub fn enable_vec(&mut self) -> Result<()> {
         self.ensure_writable()?;
 

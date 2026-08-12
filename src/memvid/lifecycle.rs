@@ -69,6 +69,7 @@ pub struct Memvid {
     #[allow(dead_code)]
     pub(crate) lex_storage: Arc<RwLock<EmbeddedLexStorage>>,
     pub(crate) vec_enabled: bool,
+    pub(crate) vec_hnsw_threshold: Option<usize>,
     pub(crate) vec_compression: VectorCompression,
     pub(crate) vec_model: Option<String>,
     pub(crate) vec_index: Option<VecIndex>,
@@ -196,6 +197,7 @@ impl Memvid {
             #[cfg(feature = "lex")]
             lex_storage,
             vec_enabled: cfg!(feature = "vec"), // Enable by default if feature is enabled
+            vec_hnsw_threshold: None,
             vec_compression: VectorCompression::None,
             vec_model: None,
             vec_index: None,
@@ -378,6 +380,7 @@ impl Memvid {
             #[cfg(feature = "lex")]
             lex_storage,
             vec_enabled: false,
+            vec_hnsw_threshold: None,
             vec_compression: VectorCompression::None,
             vec_model: None,
             vec_index: None,
@@ -513,6 +516,7 @@ impl Memvid {
             #[cfg(feature = "lex")]
             lex_storage,
             vec_enabled: false,
+            vec_hnsw_threshold: None,
             vec_compression: VectorCompression::None,
             vec_model: None,
             vec_index: None,

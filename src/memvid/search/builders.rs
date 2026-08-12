@@ -48,7 +48,7 @@ impl Memvid {
         if !self.vec_enabled {
             return Ok(None);
         }
-        let mut builder = VecIndexBuilder::new();
+        let mut builder = VecIndexBuilder::new().hnsw_threshold(self.vec_hnsw_threshold);
         if let Some(index) = self.vec_index.as_ref() {
             for (frame_id, embedding) in index.entries() {
                 if self.frame_is_active(frame_id) {
@@ -216,7 +216,7 @@ impl Memvid {
     fn build_vec_index_from_segments(&mut self) -> Result<()> {
         use crate::vec::VecIndexBuilder;
 
-        let mut builder = VecIndexBuilder::new();
+        let mut builder = VecIndexBuilder::new().hnsw_threshold(self.vec_hnsw_threshold);
 
         // Clone segments to avoid borrow checker issues
         let segments = self.toc.segment_catalog.vec_segments.clone();

@@ -796,6 +796,45 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any(feature = "vec", feature = "hnsw_bench"))]
+    fn vec_hnsw_threshold_override_reaches_builder() {
+        // Build 8 vectors with the given threshold; report whether the committed
+        // index is an HNSW graph.
+        fn built_as_hnsw(threshold: Option<usize>) -> bool {
+            let dir = tempdir().expect("tmp");
+            let path = dir.path().join("threshold.mv2");
+            let mut mem = Memvid::create(&path).expect("create");
+            mem.enable_vec().expect("enable");
+            mem.set_vec_hnsw_threshold(threshold);
+            for i in 0..8u64 {
+                mem.put_with_embedding(
+                    format!("doc {i}").as_bytes(),
+                    vec![i as f32, (8 - i) as f32],
+                )
+                .expect("put");
+            }
+            mem.commit().expect("commit");
+            matches!(
+                mem.vec_index.as_ref().expect("vec index"),
+                crate::vec::VecIndex::Hnsw(_)
+            )
+        }
+
+        run_serial_test(|| {
+            // The setter reaches the builder: default keeps a small set
+            // Uncompressed; a low threshold forces HNSW.
+            assert!(
+                !built_as_hnsw(None),
+                "default: 8 vectors should not build HNSW"
+            );
+            assert!(
+                built_as_hnsw(Some(3)),
+                "low threshold: 8 vectors should build HNSW"
+            );
+        });
+    }
+
+    #[test]
     fn search_snippet_ranges_match_bytes() {
         run_serial_test(|| {
             let dir = tempdir().expect("tmp");
