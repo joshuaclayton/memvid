@@ -460,6 +460,8 @@ impl Memvid {
                         }
                         self.header = original_header;
                         self.toc = original_toc;
+                        // The whole TOC was restored, so any derived uri lookup is stale.
+                        self.clear_uri_index_cache();
                         self.data_end = original_data_end;
                         self.generation = original_generation;
                         self.dirty = original_dirty;
@@ -482,6 +484,8 @@ impl Memvid {
                 }
                 self.header = original_header;
                 self.toc = original_toc;
+                // The whole TOC was restored, so any derived uri lookup is stale.
+                self.clear_uri_index_cache();
                 self.data_end = original_data_end;
                 self.generation = original_generation;
                 self.dirty = original_dirty;
@@ -1512,6 +1516,8 @@ impl Memvid {
                         }
 
                         self.toc.frames.push(frame);
+                        // A new frame (with a uri) joined the table.
+                        self.clear_uri_index_cache();
                         delta.inserted_frames.push(frame_id);
                         sequence_to_frame.insert(record.sequence, frame_id);
                     }
@@ -2749,6 +2755,9 @@ impl Memvid {
         if let Some(index) = self.vec_index.as_mut() {
             index.remove(frame_id);
         }
+        // A frame's status just changed (supersede/delete), so the uri lookup
+        // may now resolve differently.
+        self.clear_uri_index_cache();
         Ok(())
     }
 

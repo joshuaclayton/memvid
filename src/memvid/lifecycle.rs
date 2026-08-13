@@ -6,12 +6,15 @@
 //! - Validate TOC/footer layout, recover the latest valid footer when needed.
 //! - Wire up index state (lex/vector/time) without mutating payload bytes.
 
+use std::collections::HashMap;
 use std::convert::TryInto;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom};
 use std::panic;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
+
+use once_cell::sync::OnceCell;
 
 use crate::constants::{MAGIC, SPEC_VERSION, WAL_OFFSET, WAL_SIZE_TINY};
 use crate::error::{MemvidError, Result};
@@ -41,6 +44,14 @@ const DEFAULT_LOCK_TIMEOUT_MS: u64 = 250;
 const DEFAULT_HEARTBEAT_MS: u64 = 2_000;
 const DEFAULT_STALE_GRACE_MS: u64 = 10_000;
 
+/// Resolved positions of a uri within `toc.frames`: the highest-index active
+/// frame (if any) and the highest-index frame of any status. `frame_by_uri`
+/// prefers `last_active`, falling back to `last_any`.
+pub(crate) struct UriPos {
+    pub(crate) last_active: Option<usize>,
+    pub(crate) last_any: usize,
+}
+
 /// Primary handle for interacting with a `.mv2` memory file.
 ///
 /// Holds the file descriptor, lock, header, TOC, and in-memory index state. Mutations
@@ -61,6 +72,10 @@ pub struct Memvid {
     /// Cached end of the payload region (max of payload_offset + payload_length across all frames).
     /// Updated incrementally on frame insert to avoid O(n) scans.
     pub(crate) cached_payload_end: u64,
+    /// Lazily-built `uri -> frame position` lookup backing `frame_by_uri`, so a
+    /// lookup is O(1) instead of a linear scan of `toc.frames`. Rebuilt on demand
+    /// and cleared whenever a frame's uri, status, or table membership changes.
+    pub(crate) uri_index: OnceCell<HashMap<String, UriPos>>,
     pub(crate) generation: u64,
     pub(crate) lock_settings: LockSettings,
     pub(crate) lex_enabled: bool,
@@ -189,6 +204,7 @@ impl Memvid {
             pending_frame_inserts: 0,
             data_end,
             cached_payload_end,
+            uri_index: OnceCell::new(),
             generation: 0,
             lock_settings: LockSettings::default(),
             lex_enabled: cfg!(feature = "lex"), // Enable by default if feature is enabled
@@ -371,6 +387,7 @@ impl Memvid {
             pending_frame_inserts: 0,
             data_end: 0,
             cached_payload_end: 0,
+            uri_index: OnceCell::new(),
             generation,
             lock_settings: LockSettings::default(),
             lex_enabled: false,
@@ -506,6 +523,7 @@ impl Memvid {
             pending_frame_inserts: 0,
             data_end,
             cached_payload_end,
+            uri_index: OnceCell::new(),
             generation,
             lock_settings: LockSettings::default(),
             lex_enabled: false,
@@ -769,6 +787,48 @@ impl Memvid {
     #[cfg(feature = "temporal_track")]
     pub(crate) fn clear_temporal_track_cache(&mut self) {
         self.temporal_track = None;
+    }
+
+    /// Lazily build (and return) the `uri -> frame position` lookup for the
+    /// current `toc.frames`. Positions are the highest index seen per uri
+    /// (matching a reverse scan): a single forward pass where later frames
+    /// overwrite earlier ones records the last active position and the last
+    /// position of any status.
+    pub(crate) fn uri_index_ref(&self) -> &HashMap<String, UriPos> {
+        let frames = &self.toc.frames;
+        self.uri_index.get_or_init(|| {
+            let mut map: HashMap<String, UriPos> = HashMap::new();
+            for (pos, frame) in frames.iter().enumerate() {
+                let Some(uri) = frame.uri.as_deref() else {
+                    continue;
+                };
+                let active = frame.status == FrameStatus::Active;
+                match map.get_mut(uri) {
+                    Some(entry) => {
+                        entry.last_any = pos;
+                        if active {
+                            entry.last_active = Some(pos);
+                        }
+                    }
+                    None => {
+                        map.insert(
+                            uri.to_owned(),
+                            UriPos {
+                                last_active: active.then_some(pos),
+                                last_any: pos,
+                            },
+                        );
+                    }
+                }
+            }
+            map
+        })
+    }
+
+    /// Invalidate the `uri_index` lookup. Call after any mutation that changes a
+    /// frame's uri, status, or the membership of `toc.frames`.
+    pub(crate) fn clear_uri_index_cache(&mut self) {
+        self.uri_index.take();
     }
 
     #[cfg(feature = "temporal_track")]
