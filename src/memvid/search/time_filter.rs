@@ -1,5 +1,5 @@
 use crate::Result;
-use crate::io::time_index::read_track as time_index_read;
+use crate::io::time_index::read_range as time_index_read_range;
 use crate::memvid::lifecycle::Memvid;
 
 #[cfg(feature = "temporal_track")]
@@ -40,18 +40,16 @@ pub(super) fn frame_ids_in_date_range(
         Some(manifest) => manifest.clone(),
         None => return Ok(None),
     };
-    let entries = time_index_read(
+    // Binary-search the on-disk sorted time index for the window instead of
+    // reading + scanning the whole track — O(log N) seeks, not a full read.
+    let entries = time_index_read_range(
         &mut memvid.file,
         manifest.bytes_offset,
         manifest.bytes_length,
+        range.start,
+        range.end,
     )?;
-    let mut ids = Vec::new();
-    for entry in entries {
-        if range.contains(entry.timestamp) {
-            ids.push(entry.frame_id);
-        }
-    }
-    Ok(Some(ids))
+    Ok(Some(entries.into_iter().map(|e| e.frame_id).collect()))
 }
 
 #[cfg(feature = "temporal_track")]
