@@ -13,8 +13,7 @@ use crate::types::{
     SearchHitTemporal, SearchHitTemporalAnchor, SearchHitTemporalMention, TemporalFilter,
     TemporalTrack,
 };
-#[cfg(feature = "temporal_track")]
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU64;
 #[cfg(feature = "temporal_track")]
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
@@ -109,9 +108,34 @@ pub(crate) fn build_timeline(
         usize::try_from(nz.get()).unwrap_or(usize::MAX)
     });
     let mut result = Vec::with_capacity(entries.len().min(limit));
+
+    // Materialize the <= limit result entries, then build a parent->children
+    // map in ONE pass over toc.frames for exactly those parents. Previously
+    // each result entry re-scanned every frame for its children, an
+    // O(limit * all_frames) cost that dominated timeline assembly on large
+    // indexes. Memory is bounded by the children of the <= limit selected
+    // entries, not the whole index.
+    let selected: Vec<TimeIndexEntry> = entries.into_iter().take(limit).collect();
+    let selected_ids: HashSet<FrameId> = selected.iter().map(|e| e.frame_id).collect();
+    let mut children_by_parent: HashMap<FrameId, Vec<FrameId>> = HashMap::new();
+    for candidate in &memvid.toc.frames {
+        if candidate.status != FrameStatus::Active {
+            continue;
+        }
+        let Some(parent_id) = candidate.parent_id else {
+            continue;
+        };
+        if selected_ids.contains(&parent_id) {
+            children_by_parent
+                .entry(parent_id)
+                .or_default()
+                .push(candidate.id);
+        }
+    }
+
     #[cfg(feature = "temporal_track")]
     let temporal_track_snapshot = memvid.temporal_track_ref()?.cloned();
-    for entry in entries.into_iter().take(limit) {
+    for entry in selected {
         let Some(frame) = memvid
             .toc
             .frames
@@ -132,15 +156,10 @@ pub(crate) fn build_timeline(
             .uri
             .clone()
             .or_else(|| Some(crate::default_uri(frame.id)));
-        let child_frames: Vec<FrameId> = memvid
-            .toc
-            .frames
-            .iter()
-            .filter(|candidate| {
-                candidate.status == FrameStatus::Active && candidate.parent_id == Some(frame.id)
-            })
-            .map(|candidate| candidate.id)
-            .collect();
+        let child_frames: Vec<FrameId> = children_by_parent
+            .get(&frame.id)
+            .cloned()
+            .unwrap_or_default();
         #[cfg(feature = "temporal_track")]
         let temporal_info = if let Some(track) = temporal_track_snapshot.as_ref() {
             build_timeline_temporal_metadata(memvid, track, &frame)?
