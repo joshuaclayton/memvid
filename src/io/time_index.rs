@@ -65,7 +65,7 @@ pub fn read_track<R: Read + Seek>(
 ) -> Result<Vec<TimeIndexEntry>> {
     reader.seek(SeekFrom::Start(offset))?;
 
-    let mut magic = [0u8; 4];
+    let mut magic = [0u8; MAGIC_LEN];
     reader.read_exact(&mut magic)?;
     if magic != TIME_INDEX_MAGIC {
         return Err(MemvidError::InvalidTimeIndex {
@@ -73,22 +73,22 @@ pub fn read_track<R: Read + Seek>(
         });
     }
 
-    let mut count_buf = [0u8; 8];
+    let mut count_buf = [0u8; COUNT_LEN];
     reader.read_exact(&mut count_buf)?;
     let count = u64::from_le_bytes(count_buf);
 
-    let header_len = 4u64 + 8;
-    if length < header_len {
+    if length < HEADER_LEN {
         return Err(MemvidError::InvalidTimeIndex {
             reason: "length shorter than header".into(),
         });
     }
-    let payload_bytes = length - header_len;
-    let expected_payload = count
-        .checked_mul((std::mem::size_of::<i64>() + std::mem::size_of::<u64>()) as u64)
-        .ok_or(MemvidError::InvalidTimeIndex {
-            reason: "entry count overflow".into(),
-        })?;
+    let payload_bytes = length - HEADER_LEN;
+    let expected_payload =
+        count
+            .checked_mul(ENTRY_LEN as u64)
+            .ok_or(MemvidError::InvalidTimeIndex {
+                reason: "entry count overflow".into(),
+            })?;
     if payload_bytes != expected_payload {
         return Err(MemvidError::InvalidTimeIndex {
             reason: "length does not match declared count".into(),
@@ -125,6 +125,132 @@ pub fn read_track<R: Read + Seek>(
         entries.push(entry);
     }
 
+    Ok(entries)
+}
+
+/// On-disk layout, derived once so writer and both readers can't drift:
+/// header = magic + `u64` count; entry = LE `i64` ts + `u64` frame id.
+const MAGIC_LEN: usize = TIME_INDEX_MAGIC.len();
+const COUNT_LEN: usize = std::mem::size_of::<u64>();
+const HEADER_LEN: u64 = (MAGIC_LEN + COUNT_LEN) as u64;
+const ENTRY_LEN: usize = std::mem::size_of::<i64>() + std::mem::size_of::<u64>();
+
+/// Read the timestamp of entry `index` without loading the rest of the
+/// track (one seek + 8-byte read). `base` is the first entry's byte offset.
+fn timestamp_at<R: Read + Seek>(reader: &mut R, base: u64, index: u64) -> Result<i64> {
+    reader.seek(SeekFrom::Start(base + index * ENTRY_LEN as u64))?;
+    let mut buf = [0u8; 8];
+    reader.read_exact(&mut buf)?;
+    Ok(i64::from_le_bytes(buf))
+}
+
+/// Reads only the entries whose timestamp falls in `[start, end]` (inclusive;
+/// `None` leaves that side unbounded), binary-searching the on-disk sorted
+/// track. O(log N) seeks + O(matched) read — it never loads the whole track,
+/// which is the point: a narrow window over a mult-million-entry index costs
+/// a handful of seeks, not a full scan. Equivalent result to
+/// [`read_track`] followed by a `range.contains` filter.
+///
+/// # Errors
+/// Returns [`MemvidError::InvalidTimeIndex`] on a malformed header/length.
+pub fn read_range<R: Read + Seek>(
+    reader: &mut R,
+    offset: u64,
+    length: u64,
+    start: Option<i64>,
+    end: Option<i64>,
+) -> Result<Vec<TimeIndexEntry>> {
+    if let (Some(s), Some(e)) = (start, end) {
+        if s > e {
+            return Ok(Vec::new());
+        }
+    }
+
+    reader.seek(SeekFrom::Start(offset))?;
+    let mut magic = [0u8; MAGIC_LEN];
+    reader.read_exact(&mut magic)?;
+    if magic != TIME_INDEX_MAGIC {
+        return Err(MemvidError::InvalidTimeIndex {
+            reason: "magic mismatch".into(),
+        });
+    }
+    let mut count_buf = [0u8; COUNT_LEN];
+    reader.read_exact(&mut count_buf)?;
+    let count = u64::from_le_bytes(count_buf);
+
+    if length < HEADER_LEN {
+        return Err(MemvidError::InvalidTimeIndex {
+            reason: "length shorter than header".into(),
+        });
+    }
+    let expected_payload =
+        count
+            .checked_mul(ENTRY_LEN as u64)
+            .ok_or(MemvidError::InvalidTimeIndex {
+                reason: "entry count overflow".into(),
+            })?;
+    if length - HEADER_LEN != expected_payload {
+        return Err(MemvidError::InvalidTimeIndex {
+            reason: "length does not match declared count".into(),
+        });
+    }
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+
+    let base = offset + HEADER_LEN;
+
+    // lower = first index with timestamp >= start (0 when unbounded).
+    let mut lower = 0u64;
+    if let Some(s) = start {
+        let (mut lo, mut hi) = (0u64, count);
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if timestamp_at(reader, base, mid)? < s {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        lower = lo;
+    }
+
+    // upper = first index with timestamp > end (count when unbounded).
+    let mut upper = count;
+    if let Some(e) = end {
+        let (mut lo, mut hi) = (lower, count);
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if timestamp_at(reader, base, mid)? <= e {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        upper = lo;
+    }
+
+    if upper <= lower {
+        return Ok(Vec::new());
+    }
+
+    // Read exactly the matched slice, one entry at a time (same decode as
+    // `read_track`, avoiding a fallible slice→array conversion). The reads
+    // are sequential from `lower`, so the OS read-ahead keeps them cheap.
+    reader.seek(SeekFrom::Start(base + lower * ENTRY_LEN as u64))?;
+    #[allow(clippy::cast_possible_truncation)]
+    let span = (upper - lower) as usize;
+    let mut entries = Vec::with_capacity(span);
+    for _ in 0..span {
+        let mut ts_buf = [0u8; 8];
+        reader.read_exact(&mut ts_buf)?;
+        let mut id_buf = [0u8; 8];
+        reader.read_exact(&mut id_buf)?;
+        entries.push(TimeIndexEntry {
+            timestamp: i64::from_le_bytes(ts_buf),
+            frame_id: u64::from_le_bytes(id_buf),
+        });
+    }
     Ok(entries)
 }
 
@@ -189,6 +315,73 @@ mod tests {
         file.seek(SeekFrom::Start(0)).unwrap();
         let err = read_track(&mut file, 0, length).expect_err("unsorted entries must fail");
         matches!(err, MemvidError::InvalidTimeIndex { .. });
+    }
+
+    fn oracle_range(entries: &[TimeIndexEntry], start: Option<i64>, end: Option<i64>) -> Vec<u64> {
+        let mut ids: Vec<u64> = entries
+            .iter()
+            .filter(|e| {
+                start.is_none_or(|s| e.timestamp >= s) && end.is_none_or(|x| e.timestamp <= x)
+            })
+            .map(|e| e.frame_id)
+            .collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    #[test]
+    fn read_range_matches_linear_filter_across_windows() {
+        let mut file = tempfile().expect("temp file");
+        // Duplicate timestamps + gaps exercise the (ts, frame_id) ordering
+        // and the boundary binary searches.
+        let mut entries = vec![
+            TimeIndexEntry::new(10, 0),
+            TimeIndexEntry::new(10, 1),
+            TimeIndexEntry::new(20, 2),
+            TimeIndexEntry::new(30, 3),
+            TimeIndexEntry::new(30, 4),
+            TimeIndexEntry::new(50, 5),
+            TimeIndexEntry::new(90, 6),
+        ];
+        let (offset, length, _) = append_track(&mut file, &mut entries).expect("append");
+        let sorted = read_track(&mut file, offset, length).expect("read");
+
+        // Every window shape: inclusive bounds, on/off entry timestamps,
+        // one-sided, fully outside, and inverted.
+        let bounds = [
+            (Some(10), Some(90)),
+            (Some(10), Some(10)),
+            (Some(30), Some(30)),
+            (Some(25), Some(55)),
+            (Some(0), Some(5)),
+            (Some(91), Some(1000)),
+            (Some(30), None),
+            (None, Some(20)),
+            (None, None),
+            (Some(60), Some(20)), // inverted → empty
+        ];
+        for (start, end) in bounds {
+            let mut got: Vec<u64> = read_range(&mut file, offset, length, start, end)
+                .expect("read_range")
+                .into_iter()
+                .map(|e| e.frame_id)
+                .collect();
+            got.sort_unstable();
+            assert_eq!(
+                got,
+                oracle_range(&sorted, start, end),
+                "range {start:?}..={end:?} mismatch"
+            );
+        }
+    }
+
+    #[test]
+    fn read_range_on_empty_track_is_empty() {
+        let mut file = tempfile().expect("temp file");
+        let mut entries: Vec<TimeIndexEntry> = vec![];
+        let (offset, length, _) = append_track(&mut file, &mut entries).expect("append");
+        let got = read_range(&mut file, offset, length, Some(0), Some(100)).expect("read_range");
+        assert!(got.is_empty());
     }
 
     #[test]
