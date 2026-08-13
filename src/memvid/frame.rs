@@ -172,30 +172,26 @@ impl Memvid {
     }
 
     pub fn frame_by_uri(&self, uri: &str) -> Result<Frame> {
-        let candidate = self
-            .toc
-            .frames
-            .iter()
-            .rev()
-            .find(|frame| {
-                frame
-                    .uri
-                    .as_deref()
-                    .is_some_and(|candidate_uri| candidate_uri == uri)
-                    && frame.status == FrameStatus::Active
-            })
-            .or_else(|| {
-                self.toc
-                    .frames
-                    .iter()
-                    .rev()
-                    .find(|frame| frame.uri.as_deref() == Some(uri))
-            })
-            .cloned();
+        // O(1) lookup via the lazily-built uri index: prefer the highest-index
+        // active frame for the uri, else the highest-index frame of any status.
+        let position = self
+            .uri_index_ref()
+            .get(uri)
+            .map(|entry| entry.last_active.unwrap_or(entry.last_any));
 
-        candidate.ok_or_else(|| MemvidError::FrameNotFoundByUri {
-            uri: uri.to_string(),
-        })
+        let Some(position) = position else {
+            return Err(MemvidError::FrameNotFoundByUri {
+                uri: uri.to_string(),
+            });
+        };
+
+        self.toc
+            .frames
+            .get(position)
+            .cloned()
+            .ok_or_else(|| MemvidError::FrameNotFoundByUri {
+                uri: uri.to_string(),
+            })
     }
 
     /// Find an active frame by its content BLAKE3 hash.
