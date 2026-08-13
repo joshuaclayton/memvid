@@ -1,7 +1,9 @@
 //! Timeline assembly helpers for `Memvid`.
 
 use crate::Result;
-use crate::io::time_index::{TimeIndexEntry, read_track as time_index_read};
+use crate::io::time_index::{
+    TimeIndexEntry, read_range as time_index_read_range, read_track as time_index_read,
+};
 use crate::memvid::lifecycle::Memvid;
 #[cfg(feature = "temporal_track")]
 use crate::memvid::search::frame_ids_for_temporal_filter;
@@ -46,11 +48,26 @@ pub(crate) fn build_timeline(
     };
 
     let mut entries = if let Some(manifest) = &memvid.toc.time_index {
-        let mut indexed = time_index_read(
-            &mut memvid.file,
-            manifest.bytes_offset,
-            manifest.bytes_length,
-        )?;
+        // Bounded window: binary-search the sorted on-disk index for the
+        // [since, until] range instead of reading the whole track and
+        // filtering. Callers that page a large index into many small windows
+        // then pay O(log N) seeks per call rather than an O(N) read each time.
+        // Unbounded (no since/until): fall back to a full read.
+        let mut indexed = if since.is_some() || until.is_some() {
+            time_index_read_range(
+                &mut memvid.file,
+                manifest.bytes_offset,
+                manifest.bytes_length,
+                since,
+                until,
+            )?
+        } else {
+            time_index_read(
+                &mut memvid.file,
+                manifest.bytes_offset,
+                manifest.bytes_length,
+            )?
+        };
         // Also include ExtractedImage frames (child frames) which may not be in time index
         let indexed_ids: std::collections::HashSet<FrameId> =
             indexed.iter().map(|e| e.frame_id).collect();
