@@ -2237,7 +2237,8 @@ impl Memvid {
             })?;
         frame.status = FrameStatus::Superseded;
         frame.superseded_by = Some(successor_id);
-        self.remove_frame_from_indexes(frame_id)
+        self.remove_frame_from_indexes(frame_id)?;
+        self.evict_child_frames(frame_id, FrameStatus::Superseded, Some(successor_id))
     }
 
     pub(crate) fn rebuild_indexes(
@@ -2927,7 +2928,8 @@ impl Memvid {
             })?;
         frame.status = FrameStatus::Deleted;
         frame.superseded_by = None;
-        self.remove_frame_from_indexes(frame_id)
+        self.remove_frame_from_indexes(frame_id)?;
+        self.evict_child_frames(frame_id, FrameStatus::Deleted, None)
     }
 
     fn remove_frame_from_indexes(&mut self, frame_id: FrameId) -> Result<()> {
@@ -2945,6 +2947,37 @@ impl Memvid {
         // A frame's status just changed (supersede/delete), so the uri lookup
         // may now resolve differently.
         self.clear_uri_index_cache();
+        Ok(())
+    }
+
+    /// Cascade an eviction to a frame's Active chunk children. A paged frame's
+    /// `#page-N` children are separate frames linked by `parent_id`; marking
+    /// only the root superseded/deleted would orphan them as Active — still
+    /// searchable and not reclaimable by vacuum. Keyed on the exact parent id
+    /// (never a uri prefix), so sibling documents whose uris share a prefix are
+    /// untouched. Chunk children have no children of their own; single level.
+    fn evict_child_frames(
+        &mut self,
+        parent: FrameId,
+        status: FrameStatus,
+        superseded_by: Option<FrameId>,
+    ) -> Result<()> {
+        let children: Vec<FrameId> = self
+            .toc
+            .frames
+            .iter()
+            .filter(|frame| frame.status == FrameStatus::Active && frame.parent_id == Some(parent))
+            .map(|frame| frame.id)
+            .collect();
+        for child in children {
+            if let Ok(idx) = usize::try_from(child) {
+                if let Some(frame) = self.toc.frames.get_mut(idx) {
+                    frame.status = status;
+                    frame.superseded_by = superseded_by;
+                }
+            }
+            self.remove_frame_from_indexes(child)?;
+        }
         Ok(())
     }
 
