@@ -3543,13 +3543,19 @@ impl Memvid {
         if options.search_text.is_none() && payload.is_none() {
             options.search_text = existing.search_text.clone();
         }
-        if options.tags.is_empty() {
+        // Tags, labels, and extra metadata are content-derived (auto-tagging,
+        // extraction). Inherit them only when the payload is untouched, for the
+        // same reason as search_text: when the payload is replaced they are
+        // re-derived from the new bytes, and carrying the superseded frame's
+        // values forward would keep the update matching the old content's terms
+        // (the lex index and search_text augmentation both index tags/labels).
+        if options.tags.is_empty() && payload.is_none() {
             options.tags = existing.tags.clone();
         }
-        if options.labels.is_empty() {
+        if options.labels.is_empty() && payload.is_none() {
             options.labels = existing.labels.clone();
         }
-        if options.extra_metadata.is_empty() {
+        if options.extra_metadata.is_empty() && payload.is_none() {
             options.extra_metadata = existing.extra_metadata.clone();
         }
 
