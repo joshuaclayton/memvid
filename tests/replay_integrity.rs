@@ -38,6 +38,7 @@ fn replay_save_does_not_corrupt_lex_index() {
                 snippet_chars: 120,
                 uri: None,
                 scope: None,
+                frames: None,
                 cursor: None,
                 #[cfg(feature = "temporal_track")]
                 temporal: None,
@@ -65,6 +66,7 @@ fn replay_save_does_not_corrupt_lex_index() {
             snippet_chars: 120,
             uri: None,
             scope: None,
+            frames: None,
             cursor: None,
             #[cfg(feature = "temporal_track")]
             temporal: None,

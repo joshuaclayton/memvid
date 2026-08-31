@@ -70,6 +70,7 @@ fn search_basic_query() {
             snippet_chars: 200,
             uri: None,
             scope: None,
+            frames: None,
             cursor: None,
             #[cfg(feature = "temporal_track")]
             temporal: None,
@@ -107,6 +108,7 @@ fn search_multiple_results() {
             snippet_chars: 200,
             uri: None,
             scope: None,
+            frames: None,
             cursor: None,
             #[cfg(feature = "temporal_track")]
             temporal: None,
@@ -161,6 +163,7 @@ fn search_respects_top_k() {
             snippet_chars: 200,
             uri: None,
             scope: None,
+            frames: None,
             cursor: None,
             #[cfg(feature = "temporal_track")]
             temporal: None,
@@ -194,6 +197,7 @@ fn search_with_scope() {
             snippet_chars: 200,
             uri: None,
             scope: Some("mv2://physics/".to_string()),
+            frames: None,
             cursor: None,
             #[cfg(feature = "temporal_track")]
             temporal: None,
@@ -231,6 +235,7 @@ fn search_returns_snippets() {
             snippet_chars: 200,
             uri: None,
             scope: None,
+            frames: None,
             cursor: None,
             #[cfg(feature = "temporal_track")]
             temporal: None,
@@ -266,6 +271,7 @@ fn search_no_results() {
             snippet_chars: 200,
             uri: None,
             scope: None,
+            frames: None,
             cursor: None,
             #[cfg(feature = "temporal_track")]
             temporal: None,
@@ -301,6 +307,7 @@ fn search_empty_memory() {
             snippet_chars: 200,
             uri: None,
             scope: None,
+            frames: None,
             cursor: None,
             #[cfg(feature = "temporal_track")]
             temporal: None,
@@ -480,5 +487,126 @@ fn timeline_respects_limit() {
         entries.len(),
         5,
         "Timeline should return exactly limit entries"
+    );
+}
+
+// ── Frame-set narrowing ────────────────────────────────────────────────
+
+/// A request for `query`, optionally narrowed to an explicit frame set.
+#[cfg(feature = "lex")]
+fn frame_scoped_request(query: &str, frames: Option<Vec<memvid_core::FrameId>>) -> SearchRequest {
+    SearchRequest {
+        query: query.to_string(),
+        top_k: 10,
+        snippet_chars: 200,
+        uri: None,
+        scope: None,
+        frames,
+        cursor: None,
+        #[cfg(feature = "temporal_track")]
+        temporal: None,
+        as_of_frame: None,
+        as_of_ts: None,
+        no_sketch: false,
+        acl_context: None,
+        acl_enforcement_mode: memvid_core::AclEnforcementMode::Audit,
+    }
+}
+
+/// A caller-supplied frame set narrows what the query is evaluated
+/// against, without touching how matches are ranked.
+#[test]
+#[cfg(feature = "lex")]
+fn search_narrows_to_a_supplied_frame_set() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("test.mv2");
+    create_searchable_memory(&path);
+    let mut mem = Memvid::open_read_only(&path).unwrap();
+
+    // "mechanics" is in both physics documents.
+    let everywhere = mem.search(frame_scoped_request("mechanics", None)).unwrap();
+    let found: Vec<&str> = everywhere.hits.iter().map(|h| h.uri.as_str()).collect();
+    assert_eq!(found.len(), 2, "expected both physics docs, got {found:?}");
+
+    // Narrowed to one of them, the other cannot come back however well
+    // it matches.
+    let classical = mem.frame_by_uri("mv2://physics/classical").unwrap().id;
+    let narrowed = mem
+        .search(frame_scoped_request("mechanics", Some(vec![classical])))
+        .unwrap();
+    let found: Vec<&str> = narrowed.hits.iter().map(|h| h.uri.as_str()).collect();
+    assert_eq!(found, ["mv2://physics/classical"]);
+}
+
+/// A frame in the set that does not match the query is still not a hit —
+/// the set narrows, it does not force.
+#[test]
+#[cfg(feature = "lex")]
+fn a_supplied_frame_set_does_not_force_non_matches() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("test.mv2");
+    create_searchable_memory(&path);
+    let mut mem = Memvid::open_read_only(&path).unwrap();
+
+    let cells = mem.frame_by_uri("mv2://biology/cells").unwrap().id;
+    let results = mem
+        .search(frame_scoped_request("mechanics", Some(vec![cells])))
+        .unwrap();
+    assert!(
+        results.hits.is_empty(),
+        "biology does not match `mechanics`, so narrowing to it finds nothing"
+    );
+}
+
+/// An empty set means empty results, never "unset". A caller whose own
+/// filtering found nothing must not silently get the whole corpus.
+#[test]
+#[cfg(feature = "lex")]
+fn an_empty_frame_set_finds_nothing() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("test.mv2");
+    create_searchable_memory(&path);
+    let mut mem = Memvid::open_read_only(&path).unwrap();
+
+    let results = mem
+        .search(frame_scoped_request("mechanics", Some(Vec::new())))
+        .unwrap();
+    assert!(results.hits.is_empty());
+}
+
+/// The set intersects with the other candidate filters rather than
+/// replacing them: a frame inside the set but outside the time bound is
+/// still excluded.
+#[test]
+#[cfg(all(feature = "lex", feature = "temporal_track"))]
+fn a_frame_set_intersects_the_time_bound() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("test.mv2");
+    create_searchable_memory(&path);
+    let mut mem = Memvid::open_read_only(&path).unwrap();
+
+    let classical = mem.frame_by_uri("mv2://physics/classical").unwrap().id;
+    // A window wide enough to hold BOTH physics documents, so anything
+    // dropped here is dropped by the frame set and not by the clock.
+    let window = memvid_core::TemporalFilter {
+        start_utc: Some(1699999999),
+        end_utc: Some(1700000001),
+        phrase: None,
+        tz: None,
+    };
+
+    let mut unrestricted = frame_scoped_request("mechanics", None);
+    unrestricted.temporal = Some(window.clone());
+    let both = mem.search(unrestricted).unwrap();
+    assert_eq!(both.hits.len(), 2, "the window admits both physics docs");
+
+    let mut restricted = frame_scoped_request("mechanics", Some(vec![classical]));
+    restricted.temporal = Some(window);
+    let results = mem.search(restricted).unwrap();
+    let found: Vec<&str> = results.hits.iter().map(|h| h.uri.as_str()).collect();
+    assert_eq!(
+        found,
+        ["mv2://physics/classical"],
+        "both filters apply: the window keeps two, the frame set keeps one of them"
     );
 }

@@ -44,6 +44,7 @@ fn test_implicit_and_precision() -> memvid_core::Result<()> {
         snippet_chars: 200,
         uri: None,
         scope: None,
+        frames: None,
         cursor: None,
         #[cfg(feature = "temporal_track")]
         temporal: None,
@@ -99,6 +100,7 @@ fn test_explicit_operators_still_work() -> memvid_core::Result<()> {
         snippet_chars: 200,
         uri: None,
         scope: None,
+        frames: None,
         cursor: None,
         #[cfg(feature = "temporal_track")]
         temporal: None,
@@ -118,6 +120,7 @@ fn test_explicit_operators_still_work() -> memvid_core::Result<()> {
         snippet_chars: 200,
         uri: None,
         scope: None,
+        frames: None,
         cursor: None,
         #[cfg(feature = "temporal_track")]
         temporal: None,

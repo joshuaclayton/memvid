@@ -112,6 +112,43 @@ impl Memvid {
             None
         };
 
+        // CALLER-SUPPLIED FRAMES: narrow to an explicit set of frames.
+        // Unlike the sketch pre-filter below this is a hard constraint —
+        // the caller has already decided these are the only frames worth
+        // searching, so an empty result here is an answer, not a reason
+        // to widen.
+        if let Some(ref requested) = request.frames {
+            if requested.is_empty() {
+                let elapsed = start_time.elapsed().as_millis();
+                return Ok(empty_search_response(
+                    request.query.clone(),
+                    params.clone(),
+                    elapsed,
+                    SearchEngineKind::Tantivy,
+                ));
+            }
+            let requested: HashSet<FrameId> = requested.iter().copied().collect();
+            candidate_filter = match candidate_filter {
+                Some(existing) => {
+                    let filtered: HashSet<FrameId> = existing
+                        .into_iter()
+                        .filter(|id| requested.contains(id))
+                        .collect();
+                    if filtered.is_empty() {
+                        let elapsed = start_time.elapsed().as_millis();
+                        return Ok(empty_search_response(
+                            request.query.clone(),
+                            params.clone(),
+                            elapsed,
+                            SearchEngineKind::Tantivy,
+                        ));
+                    }
+                    Some(filtered)
+                }
+                None => Some(requested),
+            };
+        }
+
         #[cfg(feature = "temporal_track")]
         if let Some(ref temporal_filter) = request.temporal {
             if !temporal_filter.is_empty() {
@@ -213,13 +250,25 @@ impl Memvid {
                 candidate_filter = match candidate_filter {
                     Some(existing) => {
                         // Intersection: keep only IDs that pass both filters
+                        // Borrowed, not consumed: `existing` is still
+                        // needed below when the intersection is empty.
                         let filtered: HashSet<FrameId> = existing
-                            .into_iter()
+                            .iter()
+                            .copied()
                             .filter(|id| sketch_set.contains(id))
                             .collect();
                         if filtered.is_empty() {
-                            // Fall back to sketch-only if intersection is empty
-                            Some(sketch_set)
+                            // Sketch is a recall heuristic, so an empty
+                            // intersection normally means the sketch pass
+                            // was unhelpful and is discarded. But it must
+                            // never widen past a set the caller supplied
+                            // explicitly — that would search frames the
+                            // caller ruled out.
+                            if request.frames.is_some() {
+                                Some(existing)
+                            } else {
+                                Some(sketch_set)
+                            }
                         } else {
                             Some(filtered)
                         }

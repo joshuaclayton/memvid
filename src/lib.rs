@@ -689,6 +689,7 @@ mod tests {
                 snippet_chars: 200,
                 uri: None,
                 scope: None,
+                frames: None,
                 cursor: None,
                 #[cfg(feature = "temporal_track")]
                 temporal: None,
@@ -710,6 +711,7 @@ mod tests {
                 snippet_chars: 200,
                 uri: None,
                 scope: None,
+                frames: None,
                 cursor: None,
                 #[cfg(feature = "temporal_track")]
                 temporal: None,
@@ -783,6 +785,7 @@ mod tests {
                     snippet_chars: 160,
                     uri: None,
                     scope: None,
+                    frames: None,
                     cursor: None,
                     #[cfg(feature = "temporal_track")]
                     temporal: None,
@@ -846,6 +849,7 @@ mod tests {
                     snippet_chars: 160,
                     uri: None,
                     scope: None,
+                    frames: None,
                     cursor: None,
                     #[cfg(feature = "temporal_track")]
                     temporal: None,
@@ -932,6 +936,7 @@ mod tests {
                     snippet_chars: 120,
                     uri: Some("mv2://docs/pricing.md".into()),
                     scope: None,
+                    frames: None,
                     cursor: None,
                     #[cfg(feature = "temporal_track")]
                     temporal: None,
@@ -957,6 +962,7 @@ mod tests {
                     snippet_chars: 120,
                     uri: None,
                     scope: Some("mv2://docs/".into()),
+                    frames: None,
                     cursor: None,
                     #[cfg(feature = "temporal_track")]
                     temporal: None,
@@ -1012,6 +1018,7 @@ mod tests {
                     snippet_chars: 90,
                     uri: None,
                     scope: None,
+                    frames: None,
                     cursor: None,
                     #[cfg(feature = "temporal_track")]
                     temporal: None,
@@ -1037,6 +1044,7 @@ mod tests {
                     snippet_chars: 90,
                     uri: None,
                     scope: None,
+                    frames: None,
                     cursor: Some(cursor),
                     #[cfg(feature = "temporal_track")]
                     temporal: None,
@@ -1080,6 +1088,7 @@ mod tests {
                     snippet_chars: 120,
                     uri: None,
                     scope: None,
+                    frames: None,
                     cursor: None,
                     #[cfg(feature = "temporal_track")]
                     temporal: None,

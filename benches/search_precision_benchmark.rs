@@ -67,6 +67,7 @@ fn bench_query_latency(c: &mut Criterion) {
                         snippet_chars: 200,
                         uri: None,
                         scope: None,
+                        frames: None,
                         cursor: None,
                         #[cfg(feature = "temporal_track")]
                         temporal: None,
@@ -102,6 +103,7 @@ fn bench_precision(c: &mut Criterion) {
                         snippet_chars: 200,
                         uri: None,
                         scope: None,
+                        frames: None,
                         cursor: None,
                         #[cfg(feature = "temporal_track")]
                         temporal: None,
@@ -147,6 +149,7 @@ fn bench_result_count(c: &mut Criterion) {
                         snippet_chars: 200,
                         uri: None,
                         scope: None,
+                        frames: None,
                         cursor: None,
                         #[cfg(feature = "temporal_track")]
                         temporal: None,
