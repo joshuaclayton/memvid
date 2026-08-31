@@ -283,6 +283,7 @@ fn search_arden(mem: &mut Memvid, query: &str, top_k: usize) -> Vec<memvid_core:
         snippet_chars: 300,
         uri: None,
         scope: None,
+        frames: None,
         cursor: None,
         #[cfg(feature = "temporal_track")]
         temporal: None,

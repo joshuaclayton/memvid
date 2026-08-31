@@ -99,6 +99,7 @@ fn hits(path: &std::path::Path, query: &str) -> usize {
         snippet_chars: 64,
         uri: None,
         scope: None,
+        frames: None,
         cursor: None,
         #[cfg(feature = "temporal_track")]
         temporal: None,
@@ -190,7 +191,11 @@ fn update_multi_grow() {
     let (_d, p) = shard();
     build(&p, URI, &content("ALPHA", MED));
     update(&p, URI, &content("BETA", BIG));
-    assert_eq!(hits(&p, "alpha"), 0, "old chunk children must be superseded");
+    assert_eq!(
+        hits(&p, "alpha"),
+        0,
+        "old chunk children must be superseded"
+    );
     assert!(hits(&p, "beta") > 0);
     assert_eq!(active(&p), fresh_active(&content("BETA", BIG)));
 }
@@ -223,7 +228,11 @@ fn update_multi_same_count() {
     let (_d, p) = shard();
     build(&p, URI, &content("ALPHA", MED));
     update(&p, URI, &content("BETA", MED));
-    assert_eq!(hits(&p, "alpha"), 0, "same-count edit must still evict old text");
+    assert_eq!(
+        hits(&p, "alpha"),
+        0,
+        "same-count edit must still evict old text"
+    );
     assert!(hits(&p, "beta") > 0);
     assert_eq!(active(&p), fresh_active(&content("BETA", MED)));
 }
@@ -517,6 +526,7 @@ fn as_of_alpha_after_edit(bytes_a: &[u8], bytes_b: &[u8]) -> usize {
         snippet_chars: 64,
         uri: None,
         scope: None,
+        frames: None,
         cursor: None,
         #[cfg(feature = "temporal_track")]
         temporal: None,

@@ -14,6 +14,7 @@ fn req(query: &str) -> SearchRequest {
         snippet_chars: 200,
         uri: None,
         scope: None,
+        frames: None,
         cursor: None,
         #[cfg(feature = "temporal_track")]
         temporal: None,

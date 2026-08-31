@@ -64,6 +64,7 @@ fn doctor_rebuilds_tantivy_index() {
                 snippet_chars: 200,
                 uri: None,
                 scope: None,
+                frames: None,
                 cursor: None,
                 #[cfg(feature = "temporal_track")]
                 temporal: None,
@@ -117,6 +118,7 @@ fn doctor_rebuilds_tantivy_index() {
                 snippet_chars: 200,
                 uri: None,
                 scope: None,
+                frames: None,
                 cursor: None,
                 #[cfg(feature = "temporal_track")]
                 temporal: None,
@@ -270,6 +272,7 @@ fn open_file_with_tantivy_segments_enables_lex() {
             snippet_chars: 200,
             uri: None,
             scope: None,
+            frames: None,
             cursor: None,
             #[cfg(feature = "temporal_track")]
             temporal: None,
@@ -363,6 +366,7 @@ fn doctor_rebuild_produces_searchable_index() {
                 snippet_chars: 200,
                 uri: None,
                 scope: None,
+                frames: None,
                 cursor: None,
                 #[cfg(feature = "temporal_track")]
                 temporal: None,
@@ -392,6 +396,7 @@ fn doctor_rebuild_produces_searchable_index() {
                 snippet_chars: 200,
                 uri: None,
                 scope: None,
+                frames: None,
                 cursor: None,
                 #[cfg(feature = "temporal_track")]
                 temporal: None,

@@ -81,6 +81,7 @@ fn shrink_reclaims_space_and_preserves_content() {
             snippet_chars: 80,
             uri: None,
             scope: None,
+            frames: None,
             cursor: None,
             #[cfg(feature = "temporal_track")]
             temporal: None,
@@ -161,7 +162,8 @@ fn shrink_survives_records_larger_than_target_region() {
 
     let mut mem = Memvid::create(&path).expect("create");
     mem.enable_lex().expect("lex");
-    mem.begin_batch(batch_opts(16 * 1024 * 1024)).expect("batch");
+    mem.begin_batch(batch_opts(16 * 1024 * 1024))
+        .expect("batch");
     // ~6.6MB of doc text (chunk entries roughly double it in the WAL) —
     // comfortably past the 4MiB floor the region shrinks back to.
     for i in 0..600 {
@@ -175,9 +177,7 @@ fn shrink_survives_records_larger_than_target_region() {
     drop(mem);
 
     let mut mem = Memvid::open(&path).expect("reopen after shrink");
-    let frame = mem
-        .frame_by_uri("mv2://shrink/599")
-        .expect("frame by uri");
+    let frame = mem.frame_by_uri("mv2://shrink/599").expect("frame by uri");
     let text = mem.frame_text_by_id(frame.id).expect("frame text");
     assert!(text.contains("zebra599 "), "doc intact after shrink");
 }

@@ -91,6 +91,7 @@ fn main() -> Result<()> {
         snippet_chars: 200,
         uri: None,
         scope: None,
+        frames: None,
         cursor: None,
         #[cfg(feature = "temporal_track")]
         temporal: None,
@@ -122,6 +123,7 @@ fn main() -> Result<()> {
         snippet_chars: 100,
         uri: None,
         scope: Some("mv2://docs/".to_string()),
+        frames: None,
         cursor: None,
         #[cfg(feature = "temporal_track")]
         temporal: None,

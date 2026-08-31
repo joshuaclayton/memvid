@@ -86,6 +86,7 @@ impl Memvid {
             snippet_chars: request.snippet_chars,
             uri: request.uri.clone(),
             scope: request.scope.clone(),
+            frames: None,
             cursor: request.cursor.clone(),
             #[cfg(feature = "temporal_track")]
             temporal: request.temporal.clone().or_else(|| {

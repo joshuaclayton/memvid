@@ -51,6 +51,19 @@ pub struct SearchRequest {
     #[serde(default)]
     /// Restrict search to a named scope/collection.
     pub scope: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Restrict search to these frames — a hard constraint, intersected
+    /// with every other candidate filter.
+    ///
+    /// How membership is decided is entirely the caller's business: a
+    /// predicate over frame metadata, an external index, a graph
+    /// traversal. This only narrows what the query is evaluated
+    /// against, so ranking is unchanged — the same scores over fewer
+    /// documents.
+    ///
+    /// An empty set means empty results, not "unset": a caller that
+    /// found nothing to search must not silently get everything.
+    pub frames: Option<Vec<FrameId>>,
     #[serde(default)]
     /// Pagination cursor.
     pub cursor: Option<String>,
