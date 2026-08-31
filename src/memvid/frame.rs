@@ -161,6 +161,41 @@ fn mime_is_text(mime: &str) -> bool {
 }
 
 impl Memvid {
+    /// Every frame in the table of contents, in id order — position is
+    /// the [`FrameId`].
+    ///
+    /// Borrowed, unlike [`Memvid::frame_by_id`], which clones. That
+    /// matters for anything that inspects the whole table: a caller
+    /// filtering a million frames on their metadata pays a String and a
+    /// map allocation per frame through the by-id lookup, and nothing at
+    /// all through this.
+    ///
+    /// Two things it deliberately exposes:
+    ///
+    /// - Superseded and tombstoned frames are included. Use
+    ///   [`Memvid::active_frames`] for the ones search can reach.
+    /// - Frames appended to the WAL but not yet committed are NOT
+    ///   included, so a writer reading this mid-batch sees the table as
+    ///   of the last commit.
+    #[must_use]
+    pub fn frames(&self) -> &[Frame] {
+        &self.toc.frames
+    }
+
+    /// Every frame search can reach, in id order.
+    ///
+    /// The safe default: [`Memvid::frames`] includes superseded and
+    /// tombstoned entries, and a caller that forgets to filter them
+    /// silently counts deleted content. Reach for `frames` instead when
+    /// you need indexing, a length, or to hand a slice to a parallel
+    /// iterator.
+    pub fn active_frames(&self) -> impl Iterator<Item = &Frame> {
+        self.toc
+            .frames
+            .iter()
+            .filter(|frame| frame.status == FrameStatus::Active)
+    }
+
     pub fn frame_by_id(&self, frame_id: FrameId) -> Result<Frame> {
         let index =
             usize::try_from(frame_id).map_err(|_| MemvidError::FrameNotFound { frame_id })?;
