@@ -538,3 +538,69 @@ fn commit_per_put_survives_wal_growth() {
         "all frames should be durable after WAL growth"
     );
 }
+
+// ── Frame list accessors ───────────────────────────────────────────────
+
+/// `frames()` is the whole table — superseded and tombstoned included —
+/// and position in it is the frame id.
+#[test]
+fn frames_lists_the_whole_table_in_id_order() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("frames.mv2");
+
+    let mut mem = Memvid::create(&path).unwrap();
+    for i in 0..4 {
+        let opts = PutOptions {
+            uri: Some(format!("mv2://doc/{i}")),
+            ..Default::default()
+        };
+        mem.put_bytes_with_options(format!("body {i}").as_bytes(), opts)
+            .unwrap();
+    }
+    mem.commit().unwrap();
+
+    let mem = Memvid::open_read_only(&path).unwrap();
+    assert_eq!(mem.frames().len(), 4);
+    for (position, frame) in mem.frames().iter().enumerate() {
+        assert_eq!(
+            frame.id, position as u64,
+            "position in the slice is the frame id"
+        );
+        // The same frame the by-id lookup clones out.
+        assert_eq!(mem.frame_by_id(frame.id).unwrap().uri, frame.uri);
+    }
+}
+
+/// `active_frames()` is the safe default: a deleted frame stays in the
+/// table but is not reachable, and a caller iterating the raw table
+/// without filtering would count it.
+#[test]
+fn active_frames_excludes_what_search_cannot_reach() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("frames.mv2");
+
+    let mut mem = Memvid::create(&path).unwrap();
+    for i in 0..3 {
+        let opts = PutOptions {
+            uri: Some(format!("mv2://doc/{i}")),
+            ..Default::default()
+        };
+        mem.put_bytes_with_options(format!("body {i}").as_bytes(), opts)
+            .unwrap();
+    }
+    mem.commit().unwrap();
+    mem.delete_frame(1).unwrap();
+    mem.commit().unwrap();
+
+    let mem = Memvid::open_read_only(&path).unwrap();
+    assert_eq!(
+        mem.frames().len(),
+        3,
+        "the deleted frame is still in the table"
+    );
+    let live: Vec<&str> = mem
+        .active_frames()
+        .filter_map(|frame| frame.uri.as_deref())
+        .collect();
+    assert_eq!(live, ["mv2://doc/0", "mv2://doc/2"]);
+}
