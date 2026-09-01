@@ -124,6 +124,29 @@ pub struct Memvid {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct OpenReadOptions {
     pub allow_repair: bool,
+    /// Re-encode the decoded table of contents and compare the digest
+    /// against `Toc::toc_checksum`, on top of the footer hash that a
+    /// read-only open already verifies.
+    ///
+    /// **Off by default, because on this path it is not an integrity
+    /// check.** `toc_checksum` is a field INSIDE the byte range that
+    /// `CommitFooter::toc_hash` covers, and `find_last_valid_footer`
+    /// refuses a footer whose hash does not match those bytes — so by the
+    /// time the table of contents is decoded, its bytes are already proven
+    /// to be what the writer wrote. Re-encoding can then only disagree if
+    /// serialization stopped round-tripping, which is a code regression,
+    /// not corruption.
+    ///
+    /// It is not free: the check clones the whole table of contents and
+    /// re-serializes it. Measured on a 1.37 GB / 1.5M-frame table, that is
+    /// **3–6 seconds against 0.87 s for the footer hash it duplicates**,
+    /// and the clone plus the re-encoded bytes are resident alongside the
+    /// original, which is most of the open's peak memory.
+    ///
+    /// Turn it on to assert round-tripping — `doctor` does, deliberately —
+    /// or when reading a file old enough that its footer predates
+    /// `toc_hash`.
+    pub verify_toc_round_trip: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -488,24 +511,43 @@ impl Memvid {
             return Self::open(path_ref);
         }
 
-        Self::open_read_only_snapshot(path_ref)
+        Self::open_read_only_snapshot(path_ref, options)
     }
 
-    fn open_read_only_snapshot(path_ref: &Path) -> Result<Self> {
+    fn open_read_only_snapshot(path_ref: &Path, options: OpenReadOptions) -> Result<Self> {
+        // Phase timings for a read-only open. A large memory file spends
+        // most of its open somewhere specific, and without attribution the
+        // obvious guess (extracting the embedded index) is wrong — that is
+        // lazy, on first search. Emitted at debug so a caller can ask with
+        // RUST_LOG=memvid_core=debug and pay nothing otherwise.
+        let opened_at = std::time::Instant::now();
         let mut file = OpenOptions::new().read(true).write(true).open(path_ref)?;
         let TailSnapshot {
             toc,
             footer_offset,
             data_end,
             generation,
-        } = load_tail_snapshot(&file)?;
+        } = load_tail_snapshot(&file, options.verify_toc_round_trip)?;
+        let tail = opened_at.elapsed();
+        tracing::debug!(
+            phase = "load_tail_snapshot",
+            frames = toc.frames.len(),
+            elapsed_ms = tail.as_millis() as u64,
+            "read and deserialized the table of contents"
+        );
 
+        let phase = std::time::Instant::now();
         let mut header = HeaderCodec::read(&mut file)?;
         header.footer_offset = footer_offset;
         header.toc_checksum = toc.toc_checksum;
 
         let lock = FileLock::acquire_with_mode(&file, LockMode::Shared)?;
         let wal = EmbeddedWal::open_read_only(&file, &header)?;
+        tracing::debug!(
+            phase = "header_lock_wal",
+            elapsed_ms = phase.elapsed().as_millis() as u64,
+            "read the header, took a shared lock, opened the wal"
+        );
 
         #[cfg(feature = "lex")]
         let lex_storage = Arc::new(RwLock::new(EmbeddedLexStorage::from_manifest(
@@ -561,13 +603,18 @@ impl Memvid {
             completed_sessions: Vec::new(),
         };
 
+        let after_construct = std::time::Instant::now();
+
         // Use consolidated helper for lex_enabled check
         memvid.lex_enabled = has_lex_index(&memvid.toc);
         if memvid.lex_enabled {
             memvid.load_lex_index_from_manifest()?;
         }
+        let lex_ms = after_construct.elapsed().as_millis() as u64;
+        let tantivy_at = std::time::Instant::now();
         #[cfg(feature = "lex")]
         memvid.init_tantivy()?;
+        let tantivy_ms = tantivy_at.elapsed().as_millis() as u64;
 
         memvid.vec_enabled =
             memvid.toc.indexes.vec.is_some() || !memvid.toc.segment_catalog.vec_segments.is_empty();
@@ -583,9 +630,21 @@ impl Memvid {
         memvid.load_logic_mesh()?;
         memvid.load_sketch_track()?;
 
+        let tracks_at = std::time::Instant::now();
         memvid.bootstrap_segment_catalog();
         #[cfg(feature = "temporal_track")]
         memvid.ensure_temporal_track_loaded()?;
+        let tracks_ms = tracks_at.elapsed().as_millis() as u64;
+
+        tracing::debug!(
+            lex_ms,
+            tantivy_ms,
+            tracks_ms,
+            phase = "post_construct",
+            elapsed_ms = after_construct.elapsed().as_millis() as u64,
+            total_ms = opened_at.elapsed().as_millis() as u64,
+            "index wiring after the table of contents"
+        );
 
         Ok(memvid)
     }
@@ -1417,16 +1476,39 @@ fn locate_footer_window(mmap: &[u8]) -> Option<(FooterSlice<'_>, usize)> {
     None
 }
 
-fn load_tail_snapshot(file: &File) -> Result<TailSnapshot> {
+fn load_tail_snapshot(file: &File, verify_round_trip: bool) -> Result<TailSnapshot> {
     // Safety: we only create a read-only mapping over the stable file bytes.
     let mmap = unsafe { Mmap::map(file)? };
 
+    let located_at = std::time::Instant::now();
     let (slice, offset_adjustment) =
         locate_footer_window(&mmap).ok_or_else(|| MemvidError::InvalidToc {
             reason: "no valid commit footer found".into(),
         })?;
+    let locate = located_at.elapsed();
+
+    // Deserializing the table of contents materializes one `Frame` per
+    // frame in the file, each with its own strings — the dominant cost on a
+    // large memory file, and the one worth attributing separately from the
+    // integrity check that follows it.
+    let decoded_at = std::time::Instant::now();
     let toc = Toc::decode(slice.toc_bytes)?;
-    toc.verify_checksum()?;
+    let decode = decoded_at.elapsed();
+
+    // The footer hash above already proved these bytes; this only adds a
+    // serialization round-trip assertion. See `OpenReadOptions`.
+    let verified_at = std::time::Instant::now();
+    if verify_round_trip {
+        toc.verify_checksum()?;
+    }
+    tracing::debug!(
+        toc_bytes = slice.toc_bytes.len(),
+        frames = toc.frames.len(),
+        locate_ms = locate.as_millis() as u64,
+        decode_ms = decode.as_millis() as u64,
+        verify_ms = verified_at.elapsed().as_millis() as u64,
+        "table of contents loaded"
+    );
 
     Ok(TailSnapshot {
         toc,
