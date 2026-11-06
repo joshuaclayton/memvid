@@ -10,7 +10,7 @@ use tempfile::TempDir;
 use crate::memvid::lifecycle::Memvid;
 use crate::types::{
     AclContext, AclEnforcementMode, AdaptiveConfig, AdaptiveResult, AdaptiveStats,
-    EmbeddingQualityStats, Frame, FrameId, FrameStatus, SearchHit, TimelineEntry, TimelineQuery,
+    EmbeddingQualityStats, FrameId, FrameStatus, SearchHit, TimelineEntry, TimelineQuery,
     VecSegmentDescriptor, compute_embedding_quality, find_adaptive_cutoff,
 };
 use crate::{LexSearchHit, MemvidError, Result, VecSearchHit};
@@ -1049,25 +1049,40 @@ pub fn is_frame_text_indexable(frame: &crate::types::Frame) -> bool {
         || frame.chunk_manifest.is_some()
 }
 
+#[cfg(all(test, feature = "lex"))]
+thread_local! {
+    static LEX_REBUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 #[cfg(feature = "lex")]
 impl Memvid {
+    pub(crate) fn rebuild_tantivy_from_empty(&mut self) -> Result<()> {
+        let mut engine = TantivyEngine::create()?;
+        self.rebuild_tantivy_engine(&mut engine)?;
+        self.tantivy = Some(engine);
+        Ok(())
+    }
+
     pub(crate) fn rebuild_tantivy_engine(&mut self, engine: &mut TantivyEngine) -> Result<bool> {
-        let mut prepared_docs: Vec<(Frame, String)> = Vec::new();
-        let frames = self.toc.frames.clone();
-        let active_frames: Vec<_> = frames
-            .into_iter()
-            .filter(|frame| frame.status == FrameStatus::Active)
-            .collect();
-
+        #[cfg(test)]
+        LEX_REBUILDS.with(|count| count.set(count.get() + 1));
         let max_payload = max_index_payload();
+        engine.reset()?;
 
-        for frame in active_frames {
+        for index in 0..self.toc.frames.len() {
+            let Some(frame) = self.toc.frames.get(index).cloned() else {
+                break;
+            };
+            if frame.status != FrameStatus::Active {
+                continue;
+            }
+
             // Check if frame has explicit search_text first - if so, use it directly
             // This handles frames created via put_bytes() or other APIs that set search_text
             // but don't have text-indexable MIME types
-            if let Some(search_text) = frame.search_text.clone() {
+            if let Some(search_text) = frame.search_text.as_deref() {
                 if !search_text.trim().is_empty() {
-                    prepared_docs.push((frame, search_text));
+                    engine.add_frame(&frame, search_text)?;
                     continue;
                 }
             }
@@ -1090,20 +1105,91 @@ impl Memvid {
             if text.trim().is_empty() {
                 continue;
             }
-            prepared_docs.push((frame, text));
+            engine.add_frame(&frame, &text)?;
         }
 
-        if prepared_docs.is_empty() {
-            engine.reset()?;
-            engine.commit()?;
-            return Ok(true);
-        }
-
-        engine.reset()?;
-        for (frame, text) in &prepared_docs {
-            engine.add_frame(frame, text)?;
-        }
         engine.commit()?;
         Ok(true)
+    }
+}
+
+#[cfg(all(test, feature = "lex"))]
+mod lex_rebuild_tests {
+    use super::LEX_REBUILDS;
+    use crate::{Memvid, PutOptions};
+    use tempfile::TempDir;
+
+    fn rebuilds_during(action: impl FnOnce()) -> usize {
+        LEX_REBUILDS.with(|count| count.set(0));
+        action();
+        LEX_REBUILDS.with(std::cell::Cell::get)
+    }
+
+    fn committed_shard(dir: &TempDir) -> Memvid {
+        let mut mem = Memvid::create(dir.path().join("rebuilds.mv2")).unwrap();
+        mem.enable_lex().unwrap();
+        for word in ["alpha", "bravo", "charlie"] {
+            let opts = PutOptions {
+                uri: Some(format!("mv2://{word}")),
+                ..Default::default()
+            };
+            mem.put_bytes_with_options(format!("{word} text").as_bytes(), opts)
+                .unwrap();
+        }
+        mem.commit().unwrap();
+        mem
+    }
+
+    #[test]
+    fn a_commit_after_an_update_rebuilds_the_lex_index_once() {
+        let dir = TempDir::new().unwrap();
+        let mut mem = committed_shard(&dir);
+        let bravo = mem.frame_by_uri("mv2://bravo").unwrap().id;
+
+        let rebuilds = rebuilds_during(|| {
+            let opts = PutOptions {
+                uri: Some("mv2://bravo".to_string()),
+                ..Default::default()
+            };
+            mem.update_frame(bravo, Some(b"zulu text".to_vec()), opts, None)
+                .unwrap();
+            mem.commit().unwrap();
+        });
+
+        assert_eq!(rebuilds, 1, "lex rebuilds for one commit after an update");
+    }
+
+    #[test]
+    fn a_commit_after_a_delete_rebuilds_the_lex_index_once() {
+        let dir = TempDir::new().unwrap();
+        let mut mem = committed_shard(&dir);
+        let charlie = mem.frame_by_uri("mv2://charlie").unwrap().id;
+
+        let rebuilds = rebuilds_during(|| {
+            mem.delete_frame(charlie).unwrap();
+            mem.commit().unwrap();
+        });
+
+        assert_eq!(rebuilds, 1, "lex rebuilds for one commit after a delete");
+    }
+
+    #[test]
+    fn a_vacuum_after_an_update_rebuilds_the_lex_index_twice() {
+        let dir = TempDir::new().unwrap();
+        let mut mem = committed_shard(&dir);
+        let bravo = mem.frame_by_uri("mv2://bravo").unwrap().id;
+
+        let rebuilds = rebuilds_during(|| {
+            let opts = PutOptions {
+                uri: Some("mv2://bravo".to_string()),
+                ..Default::default()
+            };
+            mem.update_frame(bravo, Some(b"zulu text".to_vec()), opts, None)
+                .unwrap();
+            mem.vacuum().unwrap();
+        });
+
+        // One for vacuum's commit, one for its own `rebuild_indexes`.
+        assert_eq!(rebuilds, 2, "lex rebuilds for one vacuum after an update");
     }
 }

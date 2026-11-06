@@ -2311,15 +2311,7 @@ impl Memvid {
                         storage.clear();
                         storage.set_generation(0);
                     }
-                    self.init_tantivy()?;
-                    if let Some(mut engine) = self.tantivy.take() {
-                        self.rebuild_tantivy_engine(&mut engine)?;
-                        self.tantivy = Some(engine);
-                    } else {
-                        return Err(MemvidError::InvalidToc {
-                            reason: "tantivy engine missing during rebuild".into(),
-                        });
-                    }
+                    self.rebuild_tantivy_from_empty()?;
                 } else if self.tantivy.is_some() && !inserted_frame_ids.is_empty() {
                     // Incremental path: engine exists (from open() or previous commit),
                     // instant_index was NOT used so no wrong IDs. Just add new frames.
@@ -2370,15 +2362,7 @@ impl Memvid {
                         storage.clear();
                         storage.set_generation(0);
                     }
-                    self.init_tantivy()?;
-                    if let Some(mut engine) = self.tantivy.take() {
-                        self.rebuild_tantivy_engine(&mut engine)?;
-                        self.tantivy = Some(engine);
-                    } else {
-                        return Err(MemvidError::InvalidToc {
-                            reason: "tantivy engine missing during rebuild".into(),
-                        });
-                    }
+                    self.rebuild_tantivy_from_empty()?;
                 }
 
                 // Set lex_enabled to ensure it persists
